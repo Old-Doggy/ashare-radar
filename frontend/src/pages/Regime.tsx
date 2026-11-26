@@ -148,7 +148,7 @@ export default function Regime() {
       />
 
       <div className="grid grid-cols-12 gap-4">
-        <div className="col-span-12 xl:col-span-9">
+        <div className="col-span-12 flex flex-col gap-4 xl:col-span-9">
           <Card
             index="01"
             prov={zh ? "散点 = 交易日；颜色 = 等权收益连续渐变，大小 = 成交额，虚线 = 最近 30 日轨迹" : "Each dot = a session; colour = EW return, size = turnover, dashed = 30D trail"}
@@ -189,6 +189,25 @@ export default function Regime() {
               />
             </div>
           </Card>
+
+          {/* 选中日明细：放进左栏、紧贴散点卡下方，填补左右两栏的高度差（原来放在整页底部，左栏留下大片空白） */}
+          {selRow && (
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+              {[
+                { k: t("metric.ew"), v: pct(selRow.ew_ret), tone: selRow.ew_ret >= 0 ? "up" : "down" },
+                { k: t("metric.breadth"), v: ratio(selRow.breadth, 0) },
+                { k: t("metric.csd"), v: `${(selRow.csd * 100).toFixed(2)}pp` },
+                { k: t("metric.top10"), v: ratio(selRow.top10_share, 0) },
+                { k: t("metric.limitUp"), v: `${selRow.limit_up_list_n ?? "—"} / ${selRow.limit_down_list_n ?? "—"}` },
+                { k: t("metric.amount"), v: money(selRow.amount) },
+              ].map((s) => (
+                <div key={s.k} className="card flex items-center justify-between gap-3 px-4 py-2.5">
+                  <MicroLabel>{s.k}</MicroLabel>
+                  <div className={`mono text-[16px] font-semibold ${s.tone === "up" ? "up" : s.tone === "down" ? "down" : ""}`}>{s.v}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="col-span-12 flex flex-col gap-4 xl:col-span-3">
@@ -268,24 +287,6 @@ export default function Regime() {
           </Card>
         </div>
       </div>
-
-      {selRow && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          {[
-            { k: t("metric.ew"), v: pct(selRow.ew_ret), tone: selRow.ew_ret >= 0 ? "up" : "down" },
-            { k: t("metric.breadth"), v: ratio(selRow.breadth, 0) },
-            { k: t("metric.csd"), v: `${(selRow.csd * 100).toFixed(2)}pp` },
-            { k: t("metric.top10"), v: ratio(selRow.top10_share, 0) },
-            { k: t("metric.limitUp"), v: `${selRow.limit_up_list_n ?? "—"} / ${selRow.limit_down_list_n ?? "—"}` },
-            { k: t("metric.amount"), v: money(selRow.amount) },
-          ].map((s) => (
-            <div key={s.k} className="card px-4 py-3">
-              <MicroLabel>{s.k}</MicroLabel>
-              <div className={`mono mt-2 text-[16px] font-semibold ${s.tone === "up" ? "up" : s.tone === "down" ? "down" : ""}`}>{s.v}</div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
