@@ -52,7 +52,7 @@ function Cluster({
 
 const optClass = (active: boolean) =>
   [
-    "rounded-[5px] px-[6px] py-[4px] text-[11.5px] leading-none transition-colors",
+    "rounded-[5px] px-[5px] py-[4px] text-[11.5px] leading-none transition-colors",
     active
       ? "bg-[var(--surface-3)] font-medium text-[var(--text)] shadow-[inset_0_0_0_1px_var(--border-strong)]"
       : "text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text-2)]",
@@ -147,10 +147,19 @@ export function PlaybackBar({
         /* flex-wrap + 强制换行点：五组并排约 870px，卡片在 xl 下只有 777–924px，
            直接 wrap 会掉出孤零零的「4+1」。放一个 basis-full 的隐形断点在第 4 组前，
            排不下时固定 3+2，容得下时（容器 ≥840px）全部并成一行。 */
-        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 border-t border-[var(--border)] px-3 py-2 md:px-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-3 py-2 md:px-4">
           {groups.map((g, i) => (
             <Fragment key={g.label}>
-              {i === 3 && <span aria-hidden className="h-0 basis-full @min-[840px]:hidden" />}
+              {i === 3 && <span aria-hidden className="h-0 basis-full @min-[900px]:hidden" />}
+              {i > 0 && i !== 3 && (
+                <span aria-hidden className="h-[15px] w-px shrink-0 bg-[var(--border-strong)]" />
+              )}
+              {i === 3 && (
+                <span
+                  aria-hidden
+                  className="hidden h-[15px] w-px shrink-0 bg-[var(--border-strong)] @min-[900px]:block"
+                />
+              )}
               <Cluster
                 label={g.label}
                 className={g.important ? "flex" : "hidden min-[900px]:flex"}
