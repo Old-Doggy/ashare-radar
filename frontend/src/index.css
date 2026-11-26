@@ -328,6 +328,30 @@ body {
     animation: none;
   }
 }
+
+/* 市场结构页：换时间范围时旧图面淡出，接住 notMerge 重建的硬切 */
+@keyframes chart-ghost-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.chart-ghost {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+  animation: chart-ghost-out 0.22s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-ghost {
+    animation-duration: 1ms;
+  }
+}
 @keyframes shimmer {
   0% {
     background-position: -400px 0;

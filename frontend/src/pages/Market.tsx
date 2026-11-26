@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -8,7 +8,7 @@ import { paletteFor } from "../lib/theme";
 import { money, pct, ratio, shortDate, trendClass } from "../lib/format";
 import { returnBreadth } from "../lib/charts";
 import { concentrationChart, dispersionChart } from "../lib/charts2";
-import EChart from "../components/EChart";
+import ZoomChart, { type ZoomChartHandle } from "../components/ZoomChart";
 import { Card } from "../components/Card";
 import { PageHead } from "../components/PageHead";
 import { DataState } from "../components/DataState";
@@ -25,6 +25,9 @@ const RANGES = [
 
 type RangeKey = (typeof RANGES)[number]["value"];
 
+const HINT_ZH = "滚轮缩放 · 拖拽平移 · 双击复位";
+const HINT_EN = "Scroll to zoom · drag to pan · double-click to reset";
+
 export default function Market() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -34,11 +37,61 @@ export default function Market() {
   const [params, setParams] = useSearchParams();
   const range = (params.get("range") as RangeKey) || "1Y";
 
-  const setRange = (r: RangeKey) => {
-    const next = new URLSearchParams(params);
-    next.set("range", r);
-    setParams(next, { replace: true });
+  // 触屏（粗指针）或窄屏上关闭单指拖拽平移，页面纵向滚动不被劫持；
+  // 双指捏合缩放、底部滑杆与键盘仍然可用。
+  const computePan = () => {
+    if (typeof window === "undefined" || !window.matchMedia) return true;
+    const coarse = window.matchMedia("(pointer: coarse)").matches;
+    return !coarse && window.innerWidth >= 768;
   };
+  const [pan, setPan] = useState(computePan);
+  useEffect(() => {
+    const onChange = () => setPan(computePan());
+    window.addEventListener("resize", onChange);
+    const mq = window.matchMedia?.("(pointer: coarse)");
+    mq?.addEventListener?.("change", onChange);
+    return () => {
+      window.removeEventListener("resize", onChange);
+      mq?.removeEventListener?.("change", onChange);
+    };
+  }, []);
+
+  const chart1 = useRef<ZoomChartHandle>(null);
+  const chart2 = useRef<ZoomChartHandle>(null);
+  const chart3 = useRef<ZoomChartHandle>(null);
+  const ghostId = useRef(0);
+  const ghostTimer = useRef<number | null>(null);
+  const transitionId = useRef(0);
+  const transitionTimer = useRef<number | null>(null);
+  // 拉远换范围时：先把新图摆到旧窗口，再动画拉远到新范围全览
+  const pendingExpand = useRef<{ id: number; from: [number, number][] } | null>(null);
+  const [ghost, setGhost] = useState<{ id: number; src: (string | null)[] } | null>(null);
+
+  useEffect(
+    () => () => {
+      if (ghostTimer.current) window.clearTimeout(ghostTimer.current);
+      if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    },
+    [],
+  );
+
+  // 换范围时图面会整份重建（EChart 的 notMerge）：先抓一张旧图做交叉淡出，
+  // 让“切范围”看起来是过渡而不是硬切。缩放状态本身仍只活在 ECharts 实例里。
+  const crossfade = useCallback((mutate: () => void) => {
+    const refs = [chart1, chart2, chart3];
+    const src = refs.map((r) => r.current?.snapshot() ?? null);
+    if (src.some(Boolean)) {
+      const id = ++ghostId.current;
+      setGhost({ id, src });
+      if (ghostTimer.current) window.clearTimeout(ghostTimer.current);
+      ghostTimer.current = window.setTimeout(() => setGhost((g) => (g && g.id === id ? null : g)), 380);
+    }
+    mutate();
+  }, []);
+
+  const clearGhost = useCallback(() => {
+    setGhost((g) => (g && g.id === ghostId.current ? null : g));
+  }, []);
 
   const { data: meta } = useQuery({ queryKey: ["meta"], queryFn: api.meta });
   const { data: series, isError, isPending } = useQuery({ queryKey: ["market-all"], queryFn: () => api.marketSeries() });
@@ -48,6 +101,76 @@ export default function Market() {
     const n = RANGES.find((r) => r.value === range)?.n ?? 250;
     return series.slice(-n);
   }, [series, range]);
+
+  const applyRange = (r: RangeKey) => {
+    const next = new URLSearchParams(params);
+    next.set("range", r);
+    setParams(next, { replace: true });
+  };
+
+  /**
+   * 换范围动画：数据是右端对齐的切片，所以
+   * - 拉远（3M→1Y→ALL）：先换数据，把新图摆到旧窗口位置，再动画拉远到全览；
+   * - 推近（ALL→3Y）：先让旧图动画推近到目标窗口，再换数据（此时两图内容几乎重合）。
+   * 两侧都叠加一次旧图快照的交叉淡出，遮住轴与 y 轴刻度的跳变。
+   */
+  const changeRange = (r: RangeKey) => {
+    if (r === range) return;
+    const target = RANGES.find((x) => x.value === r);
+    if (!series || !target || !rows.length) {
+      applyRange(r);
+      return;
+    }
+    const nOld = rows.length;
+    const nNew = Math.min(target.n, series.length);
+    if (nNew === nOld) {
+      crossfade(() => applyRange(r));
+      return;
+    }
+    const refs = [chart1, chart2, chart3];
+    const id = ++transitionId.current;
+    if (nNew > nOld) {
+      const offset = nNew - nOld;
+      const from = refs.map((ref): [number, number] => {
+        const [start, end] = ref.current?.getWindow() ?? [0, 100];
+        const f = ((offset + (start / 100) * (nOld - 1)) / (nNew - 1)) * 100;
+        const t = ((offset + (end / 100) * (nOld - 1)) / (nNew - 1)) * 100;
+        return [Math.min(100, Math.max(0, f)), Math.min(100, Math.max(0, t))];
+      });
+      pendingExpand.current = { id, from };
+      crossfade(() => applyRange(r));
+      return;
+    }
+    const offset = nOld - nNew;
+    const start = (offset / Math.max(1, nOld - 1)) * 100;
+    refs.forEach((ref) => ref.current?.animateWindow(start, 100, 320));
+    if (transitionTimer.current) window.clearTimeout(transitionTimer.current);
+    transitionTimer.current = window.setTimeout(() => {
+      if (transitionId.current !== id) return;
+      crossfade(() => applyRange(r));
+    }, 340);
+  };
+
+  // 拉远动画的第二步：新 option 已套用（子组件 effect 先于本 effect），先摆到旧窗口再拉远
+  useEffect(() => {
+    const pending = pendingExpand.current;
+    if (!pending || pending.id !== transitionId.current) return;
+    const refs = [chart1, chart2, chart3];
+    refs.forEach((ref, i) => ref.current?.setWindow(pending.from[i][0], pending.from[i][1]));
+    const timer = window.setTimeout(() => {
+      if (transitionId.current !== pending.id) return;
+      refs.forEach((ref) => ref.current?.animateWindow(0, 100, 460));
+      if (pendingExpand.current?.id === pending.id) pendingExpand.current = null;
+    }, 48);
+    return () => window.clearTimeout(timer);
+  }, [range]);
+
+  // 缓存图表 option：无关的重渲染（例如 ghost 状态）不会重设 option，缩放窗口得以保留。
+  // 换范围 / 主题 / 语言 / 触屏策略变化时才重建 —— 此时窗口复位到全览是预期行为。
+  const zoomOpts = useMemo(() => ({ pan }), [pan]);
+  const optBreadth = useMemo(() => returnBreadth(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
+  const optConc = useMemo(() => concentrationChart(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
+  const optDisp = useMemo(() => dispersionChart(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
 
   if (isError) return <DataState error />;
   if (series && !rows.length) return <DataState />;
@@ -123,7 +246,7 @@ export default function Market() {
             <span className="pill">{zh ? "股票池：沪深主板 + 创业板 + 科创板" : "Universe: SSE/SZSE main + ChiNext + STAR"}</span>
           </>
         }
-        right={<Segmented options={RANGES.map((r) => ({ value: r.value, label: r.label }))} value={range} onChange={setRange} />}
+        right={<Segmented options={RANGES.map((r) => ({ value: r.value, label: r.label }))} value={range} onChange={changeRange} />}
       />
 
       <div className="card grid grid-cols-2 divide-x divide-[var(--border)] md:grid-cols-3 xl:grid-cols-5">
@@ -144,7 +267,18 @@ export default function Market() {
             ? "柱 = 等权日收益 · 线 = 沪深300 · 虚线 = 流通市值加权 · 下 = 上涨股票占比"
             : "Bars = EW return · Solid = CSI 300 · Dotted = cap-weight · Lower = breadth"
         }
-        right={<span className="pill">{rows[0]?.trade_date} → {last.trade_date}</span>}
+        right={
+          <div className="flex items-center gap-3">
+            <span
+              className="hidden text-[10.5px] text-[var(--faint)] md:inline"
+              title={zh ? "方向键平移 · + / − 缩放 · 0 复位" : "Arrow keys pan · + / − zoom · 0 resets"}
+            >
+              {zh ? HINT_ZH : HINT_EN}
+            </span>
+            <span className="text-[10.5px] text-[var(--faint)] md:hidden">{zh ? "双指缩放" : "Pinch to zoom"}</span>
+            <span className="pill">{rows[0]?.trade_date} → {last.trade_date}</span>
+          </div>
+        }
         prov={zh ? "等权收益为全市场算术平均；沪深300 为指数日收益；广度为上涨 /（上涨 + 下跌）" : "EW mean return; CSI 300 index return; breadth = adv / (adv + dec)"}
         padded={false}
         bodyClass="pt-0"
@@ -158,8 +292,15 @@ export default function Market() {
           </div>
         }
       >
-        <div className="h-[380px] px-1 pb-1 md:h-[420px] md:px-2">
-          <EChart option={returnBreadth(p, rows, lang)} ariaLabel={zh ? "区间收益与广度" : "Return and breadth"} />
+        <div className="h-[400px] px-1 pb-1 md:h-[440px] md:px-2">
+          <ZoomChart
+            ref={chart1}
+            option={optBreadth}
+            ariaLabel={zh ? "区间收益与广度。滚轮缩放、拖拽平移、双击复位" : "Return and breadth. Scroll to zoom, drag to pan, double-click to reset"}
+            ghostSrc={ghost?.src[0] ?? null}
+            ghostKey={ghost?.id}
+            onGhostEnd={clearGhost}
+          />
         </div>
       </Card>
 
@@ -192,8 +333,15 @@ export default function Market() {
               </div>
             }
           >
-            <div className="h-[242px] px-1 pb-1 md:px-2">
-              <EChart option={concentrationChart(p, rows, lang)} />
+            <div className="h-[260px] px-1 pb-1 md:px-2">
+              <ZoomChart
+                ref={chart2}
+                option={optConc}
+                ariaLabel={zh ? "集中度。滚轮缩放、拖拽平移、双击复位" : "Concentration. Scroll to zoom, drag to pan, double-click to reset"}
+                ghostSrc={ghost?.src[1] ?? null}
+                ghostKey={ghost?.id}
+                onGhostEnd={clearGhost}
+              />
             </div>
           </Card>
         </div>
@@ -222,8 +370,15 @@ export default function Market() {
               </div>
             }
           >
-            <div className="h-[242px] px-1 pb-1 md:px-2">
-              <EChart option={dispersionChart(p, rows, lang)} />
+            <div className="h-[260px] px-1 pb-1 md:px-2">
+              <ZoomChart
+                ref={chart3}
+                option={optDisp}
+                ariaLabel={zh ? "分化度。滚轮缩放、拖拽平移、双击复位" : "Dispersion. Scroll to zoom, drag to pan, double-click to reset"}
+                ghostSrc={ghost?.src[2] ?? null}
+                ghostKey={ghost?.id}
+                onGhostEnd={clearGhost}
+              />
             </div>
           </Card>
         </div>

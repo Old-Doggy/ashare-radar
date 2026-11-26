@@ -8,6 +8,111 @@ import { escapeHtml } from "./html";
 const axisDate = (rows: MarketDay[]) => rows.map((r) => shortDate(r.trade_date));
 const L = (lang: string, zh: string, en: string) => (lang === "en" ? en : zh);
 
+/* -------------------------------------------------------------------------
+ * 市场结构时间轴的缩放 / 平移
+ *
+ * 缩放状态是**非受控**的：只活在 ECharts 实例里，不进 React state。
+ * EChart.tsx 用 notMerge 整份替换 option，所以任何一次父组件重渲染
+ * （主题 / 语言 / 切换范围）都会把窗口复位到全览 —— 这是预期行为。
+ *
+ * filterMode 用 "filter"：窗口外数据被过滤，y 轴会跟着窗口自适应，
+ * 放大后能真正看到细节。代价是被过滤后 dataIndex 不再指向原始数组，
+ * 所以缩放模式的 x 轴存原始交易日、tooltip 用 axisValue 回查（见 rowByDate）；
+ * 轴上的显示仍由 axisLabel.formatter 缩短为 MM/DD。
+ * ---------------------------------------------------------------------- */
+const MONO = "JetBrains Mono Variable, JetBrains Mono, monospace";
+
+/** 是否给时间序列打开缩放 / 平移；pan=false 用于触屏（保留双指缩放，不劫持纵向滚动）。 */
+export interface TimeZoom {
+  pan?: boolean;
+}
+
+/** 网格底部留给滑杆的高度。 */
+export const ZOOM_BOTTOM = 34;
+
+/** 缩放模式下 x 轴存原始交易日，这里负责缩回 MM/DD。 */
+export const axisDateLabel = (value: unknown): string => shortDate(String(value ?? ""));
+
+/** tooltip 回查：缩放模式用 axisValue（原始日期）查，普通模式退回 dataIndex。 */
+export function rowByDate<T>(arr: T[], params: unknown, field: keyof T): T | undefined {
+  const first = (params as { dataIndex?: number; axisValue?: string }[] | undefined)?.[0];
+  if (!first) return undefined;
+  if (typeof first.axisValue === "string") {
+    const hit = arr.find((item) => String(item[field]) === first.axisValue);
+    if (hit) return hit;
+  }
+  return typeof first.dataIndex === "number" ? arr[first.dataIndex] : undefined;
+}
+
+/** 缩放模式下的坐标轴指示器文字（否则会显示完整的 2016-12-01）。 */
+export const pointerDateLabel = { formatter: (params: { value?: unknown }) => axisDateLabel(params?.value) };
+
+/**
+ * inside（滚轮 / 双指缩放 + 拖拽平移）+ slider（底部缩略滑杆）联动。
+ * points 为该 x 轴的类目数量，用来限制最小缩放跨度（至少约 12 个交易日）。
+ */
+export function timeZoom(
+  p: Palette,
+  points: number,
+  xAxisIndex: number | number[],
+  zoom: TimeZoom = {},
+): NonNullable<EChartsOption["dataZoom"]> {
+  const minSpan = Math.min(90, Math.max(0.8, (12 / Math.max(1, points)) * 100));
+  const sliderStyle = {
+    backgroundColor: p.panel2,
+    borderColor: p.border,
+    fillerColor: p.accentSoft,
+    handleStyle: { color: p.accent, borderColor: p.bg, borderWidth: 1, shadowBlur: 0 },
+    moveHandleStyle: { color: p.axis, opacity: 0.45 },
+    moveHandleSize: 3,
+    emphasis: {
+      handleStyle: { color: p.accent, borderColor: p.border },
+      moveHandleStyle: { color: p.accent, opacity: 0.8 },
+      fillerColor: p.accentSoft,
+    },
+    dataBackground: {
+      lineStyle: { color: p.faint, opacity: 0.5, width: 1 },
+      areaStyle: { color: p.faint, opacity: 0.12 },
+    },
+    selectedDataBackground: {
+      lineStyle: { color: p.muted, opacity: 0.55, width: 1 },
+      areaStyle: { color: p.accent, opacity: 0.08 },
+    },
+    textStyle: { color: p.faint, fontSize: 9.5, fontFamily: MONO },
+    handleLabel: { show: false },
+    showDetail: false,
+    brushSelect: false,
+  };
+  return [
+    {
+      type: "inside",
+      xAxisIndex,
+      filterMode: "filter",
+      zoomOnMouseWheel: true,
+      moveOnMouseMove: zoom.pan !== false,
+      moveOnMouseWheel: false,
+      // ECharts 只要开启了单指/鼠标拖拽就会在 touchmove 上 preventDefault（即便
+      // moveOnMouseMove 为 false），触屏上会把页面纵向滚动一起吃掉。关闭平移时
+      // 同步关掉 preventDefaultMouseMove，让页面能正常滚动；双指缩放仍然可用。
+      preventDefaultMouseMove: zoom.pan !== false,
+      throttle: 50,
+      minSpan,
+    },
+    {
+      type: "slider",
+      xAxisIndex,
+      filterMode: "filter",
+      minSpan,
+      height: 20,
+      bottom: 2,
+      left: 10,
+      right: 12,
+      showDataShadow: true,
+      ...sliderStyle,
+    },
+  ];
+}
+
 /** 参与广度：近 N 日 breadth 面积 + 背离点 */
 export function breadthArea(p: Palette, rows: MarketDay[]): EChartsOption {
   const x = axisDate(rows);
@@ -73,9 +178,10 @@ export function breadthArea(p: Palette, rows: MarketDay[]): EChartsOption {
   };
 }
 
-/** 主图：上收益、下广度 */
-export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): EChartsOption {
-  const x = axisDate(rows);
+/** 主图：上收益、下广度。传 zoom 打开滚轮缩放 / 拖拽平移 / 底部滑杆。 */
+export function returnBreadth(p: Palette, rows: MarketDay[], lang: string, zoom?: TimeZoom): EChartsOption {
+  // 缩放模式：x 轴保存完整交易日（tooltip 用 axisValue 回查），刻度文字再缩成 MM/DD
+  const x = zoom ? rows.map((r) => r.trade_date) : axisDate(rows);
   const ew = rows.map((r) => +(r.ew_ret * 100).toFixed(2));
   const hs = rows.map((r) => (r.hs300_ret == null ? null : +(r.hs300_ret * 100).toFixed(2)));
   const cw = rows.map((r) => (r.cw_ret == null ? null : +(r.cw_ret * 100).toFixed(2)));
@@ -83,25 +189,35 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): ECha
 
   return {
     ...baseChart(p),
-    grid: [
-      { left: 6, right: 10, top: 18, height: "52%", containLabel: true },
-      { left: 6, right: 10, top: "73%", bottom: 6, containLabel: true },
-    ],
-    axisPointer: { link: [{ xAxisIndex: [0, 1] }] },
+    // 换范围时整份 option 重建（notMerge），入场动画稍长一点与图间交叉淡入配合
+    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    // 缩放视图给滑杆留位置：上面板略收，下面板抬到 66% 并留出底部空间
+    grid: zoom
+      ? [
+          { left: 6, right: 10, top: 18, height: "47%", containLabel: true },
+          { left: 6, right: 10, top: "66%", bottom: ZOOM_BOTTOM, containLabel: true },
+        ]
+      : [
+          { left: 6, right: 10, top: 18, height: "52%", containLabel: true },
+          { left: 6, right: 10, top: "73%", bottom: 6, containLabel: true },
+        ],
+    ...(zoom ? { dataZoom: timeZoom(p, x.length, [0, 1], zoom) } : {}),
+    axisPointer: zoom
+      ? { link: [{ xAxisIndex: [0, 1] }], label: pointerDateLabel }
+      : { link: [{ xAxisIndex: [0, 1] }] },
     tooltip: {
       ...baseChart(p).tooltip,
       trigger: "axis",
       formatter: (params: unknown) => {
-        const arr = params as { dataIndex: number }[];
-        const i = arr?.[0]?.dataIndex ?? 0;
-        const r = rows[i];
+        const r = rowByDate(rows, params, "trade_date");
         if (!r) return "";
+        const breadth = r.breadth == null ? "—" : `${(r.breadth * 100).toFixed(1)}%`;
         const t = (k: string) => k;
         return `<div style="min-width:188px">
           <div style="font-family:'JetBrains Mono Variable',monospace;font-size:12px;color:${p.muted};margin-bottom:6px">${escapeHtml(r.trade_date)} · ${t(regimeLabel(regimeOf(r), lang))}</div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "等权收益", "Equal-weight")}</span><b style="color:${r.ew_ret >= 0 ? p.up : p.down}">${(r.ew_ret * 100).toFixed(2)}%</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "沪深300", "CSI 300")}</span><b>${r.hs300_ret === null ? "—" : (r.hs300_ret * 100).toFixed(2) + "%"}</b></div>
-          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${br[i] == null ? "—" : br[i] + "%"}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨/下跌", "Adv/Dec")}</span><b>${r.n_adv} / ${r.n_dec}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "Top10 波动占比", "Top10 absolute-move share")}</span><b>${r.top10_share == null ? "—" : (r.top10_share * 100).toFixed(0) + "%"}</b></div>
         </div>`;
@@ -125,7 +241,10 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): ECha
         axisLabel: {
           ...axisStyle(p).axisLabel,
           fontSize: 11,
-          interval: Math.max(0, Math.floor(x.length / 8)),
+          // 缩放后刻度由 ECharts 按可视窗口自动重算；静态 interval 在放大后会空白
+          ...(zoom
+            ? { interval: "auto" as const, formatter: axisDateLabel }
+            : { interval: Math.max(0, Math.floor(x.length / 8)) }),
           hideOverlap: true,
         },
       },
@@ -170,6 +289,8 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): ECha
         data: cw,
         showSymbol: false,
         smooth: 0.2,
+        // ALL（2,424 点）下折线采样能显著降低缩放重绘成本，视觉上基本无差
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { width: 1, color: p.faint, type: "dotted" },
       },
       {
@@ -180,6 +301,7 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): ECha
         data: hs,
         showSymbol: false,
         smooth: 0.2,
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { width: 1.2, color: p.text2, opacity: 0.75 },
       },
       {
@@ -190,6 +312,7 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string): ECha
         data: br,
         showSymbol: false,
         smooth: 0.25,
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { width: 1.5, color: p.accent },
         areaStyle: {
           color: {

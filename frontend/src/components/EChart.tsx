@@ -8,6 +8,11 @@ interface Props {
   className?: string;
   onEvents?: Record<string, (params: unknown) => void>;
   ariaLabel?: string;
+  /**
+   * 实例就绪回调（可选，默认不用）。给确实需要 dispatchAction 的页面用，
+   * 不改变 setOption 的既有行为；返回值会在 dispose 前调用，用于解绑监听。
+   */
+  onReady?: (inst: echarts.ECharts) => void | (() => void);
 }
 
 export interface EChartHandle {
@@ -15,11 +20,13 @@ export interface EChartHandle {
 }
 
 const EChart = forwardRef<EChartHandle, Props>(function EChart(
-  { option, height = "100%", className, onEvents, ariaLabel },
+  { option, height = "100%", className, onEvents, ariaLabel, onReady },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<echarts.ECharts | null>(null);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -28,12 +35,14 @@ const EChart = forwardRef<EChartHandle, Props>(function EChart(
       devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
     });
     instRef.current = inst;
+    const teardown = onReadyRef.current?.(inst);
     const ro = new ResizeObserver(() => {
       if (!inst.isDisposed()) inst.resize({ animation: { duration: 180 } });
     });
     ro.observe(hostRef.current);
     return () => {
       ro.disconnect();
+      if (typeof teardown === "function") teardown();
       if (!inst.isDisposed()) inst.dispose();
       if (instRef.current === inst) instRef.current = null;
     };

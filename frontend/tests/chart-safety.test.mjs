@@ -150,6 +150,64 @@ test("rotation tooltip escapes upstream sector names", () => {
   assert.ok(!dim.includes("<img"));
 });
 
+test("zoom time axis keeps tooltip date and value together after dataZoom filtering", () => {
+  const market = { ...row, n_adv: 3, n_dec: 2, iqr: 0.01, ew_cw_gap: null };
+  const rows = [
+    { ...market, trade_date: "2026-11-10", ew_ret: 0.01, breadth: 0.5, hs300_ret: 0.02, cw_ret: 0.015, top10_share: 0.4 },
+    { ...market, trade_date: "2026-11-11", ew_ret: -0.02, breadth: 0.4, hs300_ret: null, cw_ret: null, top10_share: null },
+  ];
+  const option = charts.returnBreadth(p, rows, "en", { pan: true });
+  // 缩放模式 x 轴存完整交易日（axisValue 才能唯一回查），刻度文字由 formatter 缩成 MM/DD
+  assert.deepEqual(option.xAxis[1].data, ["2026-11-10", "2026-11-11"]);
+  // filterMode:"filter" 之后 dataIndex 只是窗口内下标；formatter 必须按 axisValue 取值
+  const filtered = option.tooltip.formatter([{ dataIndex: 0, axisValue: "2026-11-11" }]);
+  assert.ok(filtered.includes("2026-11-11"));
+  assert.ok(filtered.includes("-2.00%"));
+  assert.ok(filtered.includes("40.0%"));
+  // 非缩放模式仍走 dataIndex，视觉与原来一致（MM/DD 刻度）
+  const plain = charts.returnBreadth(p, rows, "en");
+  assert.deepEqual(plain.xAxis[1].data, ["11/10", "11/11"]);
+  const plainHtml = plain.tooltip.formatter([{ dataIndex: 1, axisValue: "11/11" }]);
+  assert.ok(plainHtml.includes("2026-11-11"));
+  assert.ok(plainHtml.includes("-2.00%"));
+});
+
+test("zoom option wires two linked dataZooms and keeps pan opt-out", () => {
+  const market = { ...row, n_adv: 3, n_dec: 2, iqr: 0.01, ew_cw_gap: null };
+  const option = charts.returnBreadth(p, [market], "en", { pan: false });
+  assert.equal(option.dataZoom.length, 2);
+  assert.deepEqual(option.dataZoom[0].xAxisIndex, [0, 1]);
+  assert.deepEqual(option.dataZoom[1].xAxisIndex, [0, 1]);
+  for (const dz of option.dataZoom) {
+    assert.equal(dz.filterMode, "filter");
+    assert.ok(!Number.isNaN(dz.minSpan));
+  }
+  // 触屏（粗指针）上关掉单指平移，页面纵向滚动才不被劫持
+  assert.equal(option.dataZoom[0].moveOnMouseMove, false);
+  assert.equal(charts.returnBreadth(p, [market], "en", { pan: true }).dataZoom[0].moveOnMouseMove, true);
+});
+
+test("zoom option renders through ECharts without NaN", () => {
+  const market = { ...row, n_adv: 3, n_dec: 2, iqr: 0.01, ew_cw_gap: null };
+  const rows = [market, { ...market, trade_date: "2026-11-12", breadth: null }];
+  const options = [
+    charts.returnBreadth(p, rows, "en", { pan: true }),
+    charts.concentrationChart(p, rows, "en", { pan: true }),
+    charts.dispersionChart(p, rows, "en", { pan: true }),
+  ];
+  for (const option of options) {
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 900, height: 420 });
+    try {
+      chart.setOption({ ...option, animation: false });
+      const svg = chart.renderToSVGString();
+      assert.ok(svg.startsWith("<svg"));
+      assert.ok(!svg.includes("NaN"));
+    } finally {
+      chart.dispose();
+    }
+  }
+});
+
 test("corrected chart options render through ECharts without errors", () => {
   const market = { ...row, n_adv: 3, n_dec: 2, iqr: 0.01, ew_cw_gap: null };
   const sector = { sw_l1: "Synthetic", ew_ret: -0.01, breadth: 0.7, amount: 1e8, n: 6, iqr: 0.02 };

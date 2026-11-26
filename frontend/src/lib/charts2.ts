@@ -4,6 +4,7 @@ import { axisStyle, baseChart, type Palette } from "./theme";
 import { money, shortDate } from "./format";
 import { regimeOf, regimeLabel, type RegimeKey } from "./regime";
 import { escapeHtml } from "./html";
+import { axisDateLabel, pointerDateLabel, rowByDate, timeZoom, ZOOM_BOTTOM, type TimeZoom } from "./charts";
 
 export const regimeColor = (k: RegimeKey): string =>
   k === "broad_up"
@@ -143,7 +144,7 @@ export function treemapChart(p: Palette, stocks: StockRow[], lang = "zh"): EChar
 }
 
 /** 集中度：Top10每5个交易日均值 + 20日均值。缺失观察不补0。 */
-export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh"): EChartsOption {
+export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", zoom?: TimeZoom): EChartsOption {
   const mean = (vals: (number | null)[], digits: number) => {
     if (!vals.length || vals.some((v) => v == null || !Number.isFinite(v))) return null;
     return +(vals.reduce<number>((sum, v) => sum + v!, 0) / vals.length).toFixed(digits);
@@ -173,13 +174,15 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh"): 
 
   return {
     ...baseChart(p),
-    grid: { left: 6, right: 10, top: 18, bottom: 24, containLabel: true },
+    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    grid: { left: 6, right: 10, top: 18, bottom: zoom ? ZOOM_BOTTOM : 24, containLabel: true },
+    ...(zoom ? { dataZoom: timeZoom(p, weekly.length, 0, zoom) } : {}),
+    ...(zoom ? { axisPointer: { label: pointerDateLabel } } : {}),
     tooltip: {
       ...baseChart(p).tooltip,
       trigger: "axis",
       formatter: (params: unknown) => {
-        const arr = params as { dataIndex: number }[];
-        const w = weekly[arr?.[0]?.dataIndex ?? 0];
+        const w = rowByDate(weekly, params, "date");
         if (!w) return "";
         return `<div style="min-width:176px">
           <div style="font-family:monospace;font-size:12px;color:${p.muted};margin-bottom:5px">${escapeHtml(w.date)} · ${w.n} ${L(lang, "交易日均值", "session avg")}</div>
@@ -192,10 +195,12 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh"): 
     },
     xAxis: {
       type: "category",
-      data: weekly.map((w) => shortDate(w.date)),
+      data: zoom ? weekly.map((w) => w.date) : weekly.map((w) => shortDate(w.date)),
       ...axisStyle(p),
       splitLine: { show: false },
-      axisLabel: { ...axisStyle(p).axisLabel, interval: Math.max(0, Math.floor(weekly.length / 5)) },
+      axisLabel: zoom
+        ? { ...axisStyle(p).axisLabel, interval: "auto" as const, formatter: axisDateLabel, hideOverlap: true }
+        : { ...axisStyle(p).axisLabel, interval: Math.max(0, Math.floor(weekly.length / 5)) },
     },
     yAxis: {
       type: "value",
@@ -220,6 +225,7 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh"): 
         data: weekly.map((w) => w.avg),
         showSymbol: false,
         smooth: 0.2,
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { color: p.accent, width: 2 },
       },
     ],
@@ -343,16 +349,18 @@ export function regimeScatter(
   };
 }
 
-export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh"): EChartsOption {
+export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh", zoom?: TimeZoom): EChartsOption {
   return {
     ...baseChart(p),
-    grid: { left: 4, right: 8, top: 14, bottom: 18, containLabel: true },
+    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    grid: { left: 4, right: 8, top: 14, bottom: zoom ? ZOOM_BOTTOM : 18, containLabel: true },
+    ...(zoom ? { dataZoom: timeZoom(p, rows.length, 0, zoom) } : {}),
+    ...(zoom ? { axisPointer: { label: pointerDateLabel } } : {}),
     tooltip: {
       ...baseChart(p).tooltip,
       trigger: "axis",
       formatter: (params: unknown) => {
-        const arr = params as { dataIndex: number }[];
-        const r = rows[arr?.[0]?.dataIndex];
+        const r = rowByDate(rows, params, "trade_date");
         if (!r) return "";
         return `<div style="font-family:monospace;font-size:12px;color:${p.muted}">${escapeHtml(r.trade_date)}</div>
           <div style="display:flex;gap:16px;justify-content:space-between"><span>${L(lang, "横截面标准差", "Cross-sectional σ")}</span><b>${r.csd == null ? "—" : (r.csd * 100).toFixed(2) + "pp"}</b></div>
@@ -362,10 +370,15 @@ export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh"): ECh
     },
     xAxis: {
       type: "category",
-      data: xs(rows),
+      data: zoom ? rows.map((r) => r.trade_date) : xs(rows),
       ...axisStyle(p),
       splitLine: { show: false },
-      axisLabel: { ...axisStyle(p).axisLabel, interval: Math.max(0, Math.floor(rows.length / 5)), fontSize: 11 },
+      axisLabel: {
+        ...axisStyle(p).axisLabel,
+        interval: zoom ? ("auto" as const) : Math.max(0, Math.floor(rows.length / 5)),
+        ...(zoom ? { formatter: axisDateLabel, hideOverlap: true } : {}),
+        fontSize: 11,
+      },
     },
     yAxis: {
       type: "value",
@@ -380,6 +393,7 @@ export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh"): ECh
         data: rows.map((r) => r.csd == null ? null : +(r.csd * 100).toFixed(2)),
         showSymbol: false,
         smooth: 0.2,
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { color: p.text2, width: 2 },
         areaStyle: {
           color: {
@@ -401,6 +415,7 @@ export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh"): ECh
         data: rows.map((r) => r.iqr == null ? null : +(r.iqr * 100).toFixed(2)),
         showSymbol: false,
         smooth: 0.2,
+        ...(zoom ? { sampling: "lttb" as const } : {}),
         lineStyle: { color: p.accent, width: 1.8, opacity: 0.95 },
       },
     ],
