@@ -25,6 +25,8 @@ from flask.json.provider import DefaultJSONProvider
 from werkzeug.exceptions import HTTPException
 
 from pipeline import settings
+from pipeline.db import table_exists
+from pipeline.sector_roll import SQL_SECTOR_ROLL_ROWS, roll_params
 
 ROOT = settings.ROOT
 LAKE = settings.LAKE
@@ -494,6 +496,18 @@ def sector_series():
             [start, start, end, end],
         )
     )
+
+
+@app.get("/api/sectors/roll")
+def sector_roll():
+    """滚动强度序列，供轮动图取数。默认最近 250 个交易日。
+
+    `amount` 不复制进 mart_sector_roll：它来自 mart_sector_day（单位：元），
+    只作为气泡面积/成交额展示用，JOIN 回来即可，避免新表口径膨胀。
+    """
+    if not table_exists(con(), "mart_sector_roll"):
+        return jsonify({"error": "sector_roll_missing", "detail": "Run pipeline.build_marts to initialize sector rotation"}), 409
+    return jsonify(rows(SQL_SECTOR_ROLL_ROWS, roll_params(request.args.get("start"), request.args.get("end"))))
 
 
 @app.get("/api/sectors/monthly")

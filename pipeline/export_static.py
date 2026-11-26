@@ -18,9 +18,10 @@ from datetime import datetime
 from pathlib import Path
 
 from . import settings
-from .db import session
+from .db import session, table_exists
 from .io_utils import atomic_write_text
 from .locking import publish_lock
+from .sector_roll import SQL_SECTOR_ROLL_ROWS, roll_params
 
 DIST = Path(os.getenv("ASHARE_RADAR_DIST_DIR", str(settings.ROOT / "frontend" / "dist"))).resolve()
 OUT = DIST / "ashare-radar.html"
@@ -130,6 +131,11 @@ def build_payload(con) -> dict:
         ORDER BY trade_date, sw_l1
         """
     )
+
+    # 旧库未重建 marts 时不能整包导出失败：缺表 → sector_roll=None（前端据此提示“离线包未包含”）。
+    # amount 来自 mart_sector_day（单位：元），只作为气泡面积/成交额展示用，不进新表。
+    has_sector_roll = table_exists(con, "mart_sector_roll")
+    sector_roll = rows(SQL_SECTOR_ROLL_ROWS, roll_params()) if has_sector_roll else None
 
     contrib_rows = rows(
         """
@@ -291,6 +297,7 @@ def build_payload(con) -> dict:
         "sector_monthly": monthly,
         "rotation": rotation,
         "sector_ranks": sector_ranks,
+        "sector_roll": sector_roll,
         "limit_quality": limit_quality,
         "contrib": contrib,
         "distribution": {meta["last_trade_date"]: {"bins": dist_rows, "stats": dist_stats}},
@@ -302,6 +309,7 @@ def build_payload(con) -> dict:
             "stocks": "latest day only",
             "distribution": "latest day only",
             "sectors": "last three years",
+            "sector_roll": "last 250 trading days" if has_sector_roll else "unavailable: rebuild marts to export",
             "contributors": "last 130 trading days",
             "stock_series": "top-60 and sample stocks, last 190 calendar days",
         },
