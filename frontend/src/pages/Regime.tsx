@@ -198,10 +198,20 @@ export default function Regime() {
                 { k: t("metric.breadth"), v: ratio(selRow.breadth, 0) },
                 { k: t("metric.csd"), v: `${(selRow.csd * 100).toFixed(2)}pp` },
                 { k: t("metric.top10"), v: ratio(selRow.top10_share, 0) },
-                { k: t("metric.limitUp"), v: `${selRow.limit_up_list_n ?? "—"} / ${selRow.limit_down_list_n ?? "—"}` },
+                {
+                  k: `${t("metric.limitUp")} / ${t("metric.limitDown")}`,
+                  // 用价格口径（收盘价 vs stk_limit 涨跌停价，含 ST），与「今日盘面」一致；
+                  // 官方名单口径 limit_*_list_n 依赖 Tushare limit_list_d，无权限日期为空。
+                  v: `${selRow.limit_up_n ?? "—"} / ${selRow.limit_down_n ?? "—"}`,
+                  hint: zh ? "价格口径：收盘价 ≥ 涨停价 × 0.999 / ≤ 跌停价 × 1.001，含 ST" : "Price caliber: close ≥ up-limit × 0.999 / ≤ down-limit × 1.001, ST included",
+                },
                 { k: t("metric.amount"), v: money(selRow.amount) },
               ].map((s) => (
-                <div key={s.k} className="card flex items-center justify-between gap-3 px-4 py-2.5">
+                <div
+                  key={s.k}
+                  title={s.hint}
+                  className="card flex items-center justify-between gap-3 px-4 py-2.5"
+                >
                   <MicroLabel>{s.k}</MicroLabel>
                   <div className={`mono text-[16px] font-semibold ${s.tone === "up" ? "up" : s.tone === "down" ? "down" : ""}`}>{s.v}</div>
                 </div>
