@@ -188,6 +188,11 @@ body {
   color: var(--muted);
   font-weight: 500;
 }
+/* KPI 卡片小标题用更大一号；.micro 是无层级规则，所以在它之后覆盖字号 */
+.micro-lg {
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+}
 .kicker {
   display: flex;
   align-items: center;

@@ -190,7 +190,10 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string, zoom?
   return {
     ...baseChart(p),
     // 换范围时整份 option 重建（notMerge），入场动画稍长一点与图间交叉淡入配合
-    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    // 关掉 ECharts 自带的系列入场动画：上下两个面板的系列类型不同（柱/线/面积），
+      // 入场动画节奏不一致，换范围时会「先动上面再动下面」。这里交给旧图快照淡出 +
+      // 自定义的 dataZoom 镜头补间，两个面板共用同一个窗口，天然同步。
+      ...(zoom ? { animation: false } : {}),
     // 缩放视图给滑杆留位置：上面板略收，下面板抬到 66% 并留出底部空间
     grid: zoom
       ? [

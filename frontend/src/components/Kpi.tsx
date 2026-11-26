@@ -33,7 +33,7 @@ export function Kpi({
   return (
     <div className={`card relative flex min-w-0 flex-col justify-between overflow-hidden px-3.5 py-3 md:px-4 ${main ? "md:py-3.5" : ""}`}>
       <div className="flex items-center gap-1.5">
-        <div className="micro truncate">{label}</div>
+        <div className="micro micro-lg truncate">{label}</div>
         {hint && (
           <span className="prov ml-auto" title={hint} aria-label={hint} role="img">
             ?

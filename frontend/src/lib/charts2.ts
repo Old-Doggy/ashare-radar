@@ -174,7 +174,10 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", z
 
   return {
     ...baseChart(p),
-    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    // 关掉 ECharts 自带的系列入场动画：上下两个面板的系列类型不同（柱/线/面积），
+      // 入场动画节奏不一致，换范围时会「先动上面再动下面」。这里交给旧图快照淡出 +
+      // 自定义的 dataZoom 镜头补间，两个面板共用同一个窗口，天然同步。
+      ...(zoom ? { animation: false } : {}),
     grid: { left: 6, right: 10, top: 18, bottom: zoom ? ZOOM_BOTTOM : 24, containLabel: true },
     ...(zoom ? { dataZoom: timeZoom(p, weekly.length, 0, zoom) } : {}),
     ...(zoom ? { axisPointer: { label: pointerDateLabel } } : {}),
@@ -352,7 +355,10 @@ export function regimeScatter(
 export function dispersionChart(p: Palette, rows: MarketDay[], lang = "zh", zoom?: TimeZoom): EChartsOption {
   return {
     ...baseChart(p),
-    ...(zoom ? { animationDuration: 380, animationEasing: "cubicOut" as const } : {}),
+    // 关掉 ECharts 自带的系列入场动画：上下两个面板的系列类型不同（柱/线/面积），
+      // 入场动画节奏不一致，换范围时会「先动上面再动下面」。这里交给旧图快照淡出 +
+      // 自定义的 dataZoom 镜头补间，两个面板共用同一个窗口，天然同步。
+      ...(zoom ? { animation: false } : {}),
     grid: { left: 4, right: 8, top: 14, bottom: zoom ? ZOOM_BOTTOM : 18, containLabel: true },
     ...(zoom ? { dataZoom: timeZoom(p, rows.length, 0, zoom) } : {}),
     ...(zoom ? { axisPointer: { label: pointerDateLabel } } : {}),

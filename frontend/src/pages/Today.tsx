@@ -160,7 +160,7 @@ export default function Today() {
           <div className="min-w-0">
             <div className="kicker">
               {last.trade_date} · {weekday(last.trade_date, lang)} · {zh ? "收盘后" : "After close"}
-              <span className="ml-auto hidden text-[var(--faint)] md:inline">{zh ? "盘面状态" : "MARKET STATE"}</span>
+              <span className="ml-auto hidden text-[12px] text-[var(--faint)] md:inline">{zh ? "盘面状态" : "MARKET STATE"}</span>
             </div>
             <h1 className="serif mt-2.5 max-w-[820px] break-words text-[22px] font-bold leading-[1.32] tracking-[-0.02em] text-[var(--text)] sm:text-[26px] md:text-[32px]">
               {headline(last, lang)}
