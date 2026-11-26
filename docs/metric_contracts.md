@@ -40,6 +40,24 @@
 - `iqr = q75 − q25`，存储为收益小数，显示 pp 时乘100。
 - `ew_cw_gap = ew_ret − cw_ret`（大小盘/权重分化代理）。
 
+## 轮动滚动指标（mart_sector_roll）
+
+| 名称 | 公式 | 备注 |
+|---|---|---|
+| `ret_rN` | `exp(Σ ln(max(1+ew_ret, 1e-6))) - 1`，取该行业最近 N 条观测行 | N ∈ {5,10,20}。不足 N 行或窗口内有空收益时返回 null。单位为小数 |
+| `br_rN` | 在同一组观测行上计算 `avg(breadth)` | 不足 N 行或窗口内有空广度时返回 null。单位为小数 |
+| `rank_rN` | 当日按非空 `ret_rN` 降序排名 | 收益为空则名次为空；并列同名次并跳号，界面列出全部并列第一 |
+
+**注意**：`ret_rN` 是**复利**累计，不是简单求和。展示层面另有"显示平滑"（指数平滑，半衰期可调），
+平滑只作用于图形坐标，**排名与所有数字一律用本表原始值**。
+
+每个行业按日期排序，窗口包含当前观测行。某个交易日缺整条行业行时，该日不占位置，窗口向前取样。例如中间缺一日时，10 条观测覆盖 11 个市场交易日。现有观测行的空字段仍占位置，并使相应指标为空。`ret_r20` 与 `mart_sector_rank.ret20` 使用相同的 20 条观测窗口。两个公式在 `1 + ew_ret ≥ 1e-6` 时相同，滚动表另外对复利因子设 `1e-6` 下限。缺整行日期没有气泡，轨迹仍断开。
+
+> 展示用成交额（气泡面积）不复制进本表：`/api/sectors/roll` 与静态导出在查询时
+> `LEFT JOIN mart_sector_day` 取 `amount`（单位：元，四舍五入到元后转 BIGINT）。缺行或金额不可用时以空心菱形表示未知。缺滚动表时导出保留 `sector_roll = null`，其余页面仍可使用。
+
+> 运维：发布走 `pipeline.release`，完整重建时在 `mart_sector_day` 之后生成 `mart_sector_roll`。`build_marts --only sector_day` 同事务刷新滚动表。`--only sector_roll` 使用当前 `mart_sector_day`。
+
 ## 情绪
 
 - 涨停：`close ≥ up_limit × 0.999`；跌停：`close ≤ down_limit × 1.001`（`stk_limit` 真实价）。

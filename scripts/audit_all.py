@@ -1,7 +1,7 @@
 """全量数据审计：从原始表独立重算，与 mart / 静态 payload / akshare 交叉验证。
 
-用法：python scripts/audit_all.py [--date 2026-11-10] [--samples 20]
-输出：docs/audit_report.md，控制台 PASS/FAIL 表。
+用法：python scripts/audit_all.py [--date 2026-11-10] [--samples 20] [--lake data/lake.duckdb]
+输出：<lake 所在目录>/meta/audit_report.md、sector_roll.json，控制台 PASS/FAIL 表。
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import math
 import random
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import duckdb
@@ -439,8 +440,85 @@ def audit_integrity(con, day: str) -> None:
     check("行业月度累计 = 日度复利", 0, int(mon), 0)
 
 
-def audit_payload(con, day: str) -> None:
-    p = ROOT / "data" / "static-data.json"
+def check_sector_roll(con, meta_dir: Path) -> None:
+    """Recompute all rolling values from each industry's ordered observations."""
+    first_result = len(RESULTS)
+    if not con.execute("""SELECT count(*) FROM information_schema.tables
+                           WHERE table_name = 'mart_sector_roll'""").fetchone()[0]:
+        check("mart_sector_roll available", True, False, kind="bool")
+        _write_sector_roll_audit(meta_dir, {"status": "failed", "checks": RESULTS[first_result:]})
+        return
+
+    dates = {row[0] for row in con.execute(
+        "SELECT DISTINCT trade_date FROM core_trade_cal WHERE is_open=1 ORDER BY trade_date"
+    ).fetchall()}
+    daily = con.execute("SELECT trade_date, sw_l1, ew_ret, breadth FROM mart_sector_day").fetchall()
+    source = {(day, sector): (ret, br) for day, sector, ret, br in daily}
+    stored_rows = con.execute("""SELECT trade_date, sw_l1, ret_r5, ret_r10, ret_r20,
+        br_r5, br_r10, br_r20, rank_r5, rank_r10, rank_r20 FROM mart_sector_roll""").fetchall()
+    stored = {(day, sector): values for day, sector, *values in stored_rows}
+    check("mart_sector_roll has rows", True, bool(stored_rows), kind="bool")
+    check("mart_sector_roll unique keys", len(stored), len(stored_rows))
+    check("mart_sector_day unique keys", len(source), len(daily))
+    check("mart_sector_roll keys match mart_sector_day", 0, len(source.keys() ^ stored.keys()))
+    check("mart_sector_day dates are trading sessions", 0, sum(day not in dates for day, _ in source))
+    by_sector = defaultdict(list)
+    for (day, sector), values in sorted(source.items()):
+        by_sector[sector].append((day, values))
+    mismatches = [0] * 3
+    max_diffs = [0.0, 0.0]
+    for sector, observations in by_sector.items():
+        for i, (day, _) in enumerate(observations):
+            values = stored.get((day, sector))
+            if values is None:  # The complete key comparison above reports the missing row.
+                continue
+            for j, width in enumerate((5, 10, 20)):
+                recent = observations[max(0, i + 1 - width):i + 1]
+                for col in (0, 1):
+                    samples = [row[col] for _, row in recent]
+                    expected = None
+                    if len(samples) == width and all(v is not None for v in samples):
+                        expected = (math.prod(max(1 + v, 1e-6) for v in samples) - 1
+                                    if col == 0 else math.fsum(samples) / width)
+                    actual = values[j + col * 3]
+                    if expected is None or actual is None:
+                        mismatches[col] += expected is not actual
+                    elif not math.isfinite(actual):
+                        mismatches[col] += 1
+                    else:
+                        diff = abs(actual - expected)
+                        max_diffs[col] = max(max_diffs[col], diff)
+                        mismatches[col] += diff > 1e-12
+
+    by_day = {}
+    for (day, _), values in stored.items():
+        by_day.setdefault(day, []).append(values)
+    for rows in by_day.values():
+        for j in range(3):
+            ordered = sorted((row[j] for row in rows if row[j] is not None), reverse=True)
+            ranks = {}
+            for rank, ret in enumerate(ordered, 1):
+                ranks.setdefault(ret, rank)
+            mismatches[2] += sum(row[6 + j] != ranks.get(row[j]) for row in rows)
+
+    check("rolling return mismatches, including NULL", 0, mismatches[0], note=f"max abs diff={max_diffs[0]:.3g}")
+    check("rolling breadth mismatches, including NULL", 0, mismatches[1], note=f"max abs diff={max_diffs[1]:.3g}")
+    check("rolling rank mismatches, including ties and NULL", 0, mismatches[2])
+    own = RESULTS[first_result:]
+    _write_sector_roll_audit(meta_dir, {"status": "ok" if all(r["ok"] for r in own) else "failed",
+                                        "rows": len(stored_rows), "checks": own})
+
+
+def _write_sector_roll_audit(meta_dir: Path, report: dict) -> None:
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    path = meta_dir / "sector_roll.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    print(f"[written] {path}")
+
+
+def audit_payload(con, day: str, p: Path | None = None) -> None:
+    if p is None:
+        p = ROOT / "data" / "static-data.json"
     if not p.exists():
         check("静态 payload 存在", True, False, 0, kind="bool")
         return
@@ -453,14 +531,45 @@ def audit_payload(con, day: str) -> None:
         check(f"payload {k}", m[k], last[k], tol)
     check("payload 个股数", int(m.n_valid), len(d["stocks"]), 0)
     print(f"  [info] payload stocks={len(d['stocks'])}, sectors={len(d['sectors'])}, rotation={len(d.get('rotation', []))}")
+    from pipeline.db import table_exists
+    from pipeline.sector_roll import SQL_SECTOR_ROLL_ROWS, roll_params
+
+    exported = d.get("sector_roll")
+    if exported is None:
+        check("payload sector_roll available", True, False, kind="bool")
+        return
+    if not table_exists(con, "mart_sector_roll"):
+        check("payload matches an existing mart_sector_roll", True, False, kind="bool")
+        return
+    cursor = con.execute(SQL_SECTOR_ROLL_ROWS, roll_params())
+    fields = [column[0] for column in cursor.description]
+    stored = cursor.fetchall()
+    check("payload sector_roll row count", len(stored), len(exported))
+    mismatches = 0
+    for actual, values in zip(exported, stored):
+        expected = dict(zip(fields, values))
+        expected["trade_date"] = expected["trade_date"].isoformat()
+        for key, value in expected.items():
+            if isinstance(value, float):
+                value = round(value, 6)
+            mismatches += key not in actual or actual[key] != value
+    check("payload sector_roll field mismatches", 0, mismatches)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="audit date YYYY-MM-DD (default: latest mart date)")
     ap.add_argument("--samples", type=int, default=20)
+    ap.add_argument(
+        "--lake",
+        default=str(ROOT / "data" / "lake.duckdb"),
+        help="DuckDB 路径（默认 data/lake.duckdb；可在副本库上验证）",
+    )
+    ap.add_argument("--offline", action="store_true", help="skip independent network data sources")
     args = ap.parse_args()
-    con = duckdb.connect(str(ROOT / "data" / "lake.duckdb"), read_only=True)
+    RESULTS.clear()
+    lake = Path(args.lake).resolve()
+    con = duckdb.connect(str(lake), read_only=True)
     day = args.date or str(con.execute("SELECT max(trade_date) FROM mart_market_day").fetchall()[0][0])
 
     print(f"== 审计交易日 {day} ==")
@@ -469,9 +578,15 @@ def main() -> None:
     print("[2] 行业指标")
     audit_sectors(con, day)
     print("[3] 个股抽样 vs akshare")
-    audit_stocks_vs_akshare(con, day, args.samples)
+    if args.offline:
+        skip("个股跨源对账", "--offline")
+    else:
+        audit_stocks_vs_akshare(con, day, args.samples)
     print("[4] 指数 vs akshare")
-    audit_index_vs_akshare(con, day)
+    if args.offline:
+        skip("指数跨源对账", "--offline")
+    else:
+        audit_index_vs_akshare(con, day)
     print("[5] 涨停口径校验（历史官方数据）")
     if con.execute("SELECT count(*) FROM core_limit_event WHERE trade_date=?", [day]).fetchall()[0][0]:
         audit_limit_method(con, day)
@@ -480,7 +595,10 @@ def main() -> None:
     print("[6] 批量一致性")
     audit_integrity(con, day)
     print("[7] 静态 payload 一致性")
-    audit_payload(con, day)
+    latest_day = str(con.execute("SELECT max(trade_date) FROM mart_market_day").fetchone()[0])
+    audit_payload(con, latest_day, lake.parent / "static-data.json")
+    print("[8] 行业滚动指标（mart_sector_roll）")
+    check_sector_roll(con, lake.parent / "meta")
     con.close()
 
     passed = [r for r in RESULTS if r["ok"] is True]
@@ -507,8 +625,9 @@ def main() -> None:
         diff = "" if r["diff"] is None else f"{r['diff']:.6g}"
         mark = "✅" if r["ok"] is True else "❌" if r["ok"] is False else "⏭️"
         lines.append(f"| {r['item']} | {exp} | {act} | {diff} | {mark} | {r['note']} |")
-    (ROOT / "docs" / "audit_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print("[written] docs/audit_report.md")
+    report = lake.parent / "meta" / "audit_report.md"
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[written] {report}")
     if fails:
         raise SystemExit(1)
 

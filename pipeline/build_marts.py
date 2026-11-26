@@ -318,6 +318,34 @@ WHERE ret20 IS NOT NULL
 ORDER BY trade_date, rank20
 """
 
+SQL_SECTOR_ROLL = """
+CREATE OR REPLACE TABLE mart_sector_roll AS
+WITH w AS (
+    SELECT trade_date, sw_l1,
+      CASE WHEN count(ew_ret) OVER w5 = 5 THEN exp(sum(log_growth) OVER w5) - 1 END AS ret_r5,
+      CASE WHEN count(breadth) OVER w5 = 5 THEN avg(breadth) OVER w5 END AS br_r5,
+      CASE WHEN count(ew_ret) OVER w10 = 10 THEN exp(sum(log_growth) OVER w10) - 1 END AS ret_r10,
+      CASE WHEN count(breadth) OVER w10 = 10 THEN avg(breadth) OVER w10 END AS br_r10,
+      CASE WHEN count(ew_ret) OVER w20 = 20 THEN exp(sum(log_growth) OVER w20) - 1 END AS ret_r20,
+      CASE WHEN count(breadth) OVER w20 = 20 THEN avg(breadth) OVER w20 END AS br_r20
+    FROM (SELECT *, ln(greatest(1.0 + ew_ret, 1e-6)) AS log_growth FROM mart_sector_day)
+    WINDOW
+      w5  AS (PARTITION BY sw_l1 ORDER BY trade_date ROWS BETWEEN 4  PRECEDING AND CURRENT ROW),
+      w10 AS (PARTITION BY sw_l1 ORDER BY trade_date ROWS BETWEEN 9  PRECEDING AND CURRENT ROW),
+      w20 AS (PARTITION BY sw_l1 ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)
+)
+SELECT trade_date, sw_l1,
+       ret_r5, ret_r10, ret_r20, br_r5, br_r10, br_r20,
+       CASE WHEN ret_r5  IS NULL THEN NULL ELSE
+            rank() OVER (PARTITION BY trade_date ORDER BY ret_r5  DESC NULLS LAST) END AS rank_r5,
+       CASE WHEN ret_r10 IS NULL THEN NULL ELSE
+            rank() OVER (PARTITION BY trade_date ORDER BY ret_r10 DESC NULLS LAST) END AS rank_r10,
+       CASE WHEN ret_r20 IS NULL THEN NULL ELSE
+            rank() OVER (PARTITION BY trade_date ORDER BY ret_r20 DESC NULLS LAST) END AS rank_r20
+FROM w
+ORDER BY trade_date, sw_l1
+"""
+
 SQL_ROTATION = """
 CREATE OR REPLACE TABLE mart_rotation_day AS
 WITH d AS (
@@ -402,6 +430,7 @@ STEPS = [
     ("feat_stock", SQL_FEAT),
     ("mart_market_day", SQL_MARKET),
     ("mart_sector_day", SQL_SECTOR_DAY),
+    ("mart_sector_roll", SQL_SECTOR_ROLL),   # 读取 mart_sector_day，必须在它之后
     ("mart_limit_quality", SQL_LIMIT_QUALITY),
     ("mart_sector_rank", SQL_SECTOR_RANK),
     ("mart_rotation_day", SQL_ROTATION),
@@ -414,11 +443,14 @@ STEPS = [
 def run(only: list[str] | None = None) -> dict:
     bridge = (settings.ROOT / "config" / "industry_bridge.csv").as_posix().replace("'", "''")
     report = {}
+    selected = {name for name, _ in STEPS if not only or any(part in name for part in only)}
+    if "mart_sector_day" in selected:
+        selected.add("mart_sector_roll")
     with publish_lock(), session(wait=True, timeout_sec=600) as con:
         con.execute("BEGIN TRANSACTION")
         try:
             for name, sql in STEPS:
-                if only and not any(o in name for o in only):
+                if name not in selected:
                     continue
                 t0 = time.time()
                 print(f"[marts] {name} ...", flush=True)
