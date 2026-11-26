@@ -60,10 +60,14 @@
 
 ## 情绪
 
-- 涨停：`close ≥ up_limit × 0.999`；跌停：`close ≤ down_limit × 1.001`（`stk_limit` 真实价）。
-- `limit_up_n` 为价格口径，包含 ST。`limit_up_non5pct_n` / `limit_up_5pct_n` 区分非5%和5%限制；旧 `limit_up_ex_st_n` / `limit_up_st_n` 保留字段但返回 NULL，**不是 ST 身份统计**。全缺限价时返回空，不伪造0家。
-- 炸板率：`broken_rate = broken / (limit_up_list_n + broken)`，分子分母都来自 `limit_list_d`（官方口径，不含 ST）；无权限时为空。
-- 连板：按价格判定的连续市场交易日涨停数；停牌/缺行情日中断。首板=1、streak_n 为>=2；不使用官方 limit_times。
+- 涨停：`close ≥ up_limit × 0.999`；跌停：`close ≤ down_limit × 1.001`（`stk_limit` 真实价）。**这是全站唯一的涨跌停口径，含 ST，全历史无缺失**，`mart_market_day.limit_up_n / limit_down_n` 由它汇总。
+  - 与交易所官方名单（Tushare `limit_list_d`，**不含 ST**）的量化差异：含 ST 口径日均多 14.8 家（最大 262）；剔除 5% 涨跌幅后的 `limit_up_non5pct_n` 日均差 4.1 家（最大 224）。因此**与同花顺等外部软件对不上是预期行为**，不是数据错误。
+- `limit_up_non5pct_n` / `limit_up_5pct_n` 按 `up_limit / pre_close - 1 ≥ 6%` 划分 10%/20% 与 5% 涨跌幅档，是**档位统计不是 ST 身份统计**；旧 `limit_up_ex_st_n` / `limit_up_st_n` 保留字段但恒为 NULL。
+- **只有两项指标依赖官方名单 `limit_list_d`**：炸板率与封单额。该接口当前无权限，覆盖率不均（2016–2018 无、2019 仅 24 天、2020–2025 完整、2026 仅 90/216 天），因此：
+  - `broken_rate = broken / (limit_up_list_n + broken)`，**官方名单为空时为空**；
+  - **不使用日线近似值顶替**。日线只能算出"盘中触及涨停价但收盘未封住"的家数，其定义比官方"炸板"更宽（2024-10-08：日线 2038 家 vs 官方 631 家），顶替会让数值与交易所名单不可对账。
+- 连板：按价格判定的连续市场交易日涨停数；停牌/缺行情日中断。首板=1、`streak_n` 为>=2；`max_streak` / `streak_n` / `first_board_n` **全部为价格口径、不依赖 `limit_list_d`**，派生表与 `feat_stock` 明细逐日自洽（审计项「连板/最高板与明细自洽」）。
+  - 与官方 `limit_list_d.limit_times` **不对齐**：官方口径在 1,569 个可比日里，连板家数日均差 5.0 家（最大 90），最高板数日均差 2.0 板（最大 16）。这是定义差异（官方名单不含 ST、按其自身连板序列计算），不是错误；对外比较时需说明。
 - 新高/新低：`adj_close ≥ 252 日最高` / `≤ 252 日最低`，需 ≥250 日历史。
 
 ## 状态分类

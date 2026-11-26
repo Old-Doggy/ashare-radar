@@ -341,6 +341,62 @@ def audit_limit_method(con, day: str = "2026-05-22") -> None:
             check("炸板率（官方分母）", broken / (official + broken), r.broken_rate, 1e-12)
 
 
+def audit_limit_caliber(con) -> None:
+    """口径纯净性：核心涨跌停指标不依赖外部名单接口（与具体某一天无关，永远跑）。"""
+    cov = con.execute(
+        """
+        SELECT count(*)                                   AS days,
+               count(limit_up_n)                          AS up_n,
+               count(limit_down_n)                        AS down_n,
+               count(*) FILTER (WHERE broken_rate IS NOT NULL)      AS broken_days,
+               count(*) FILTER (WHERE limit_up_list_n IS NOT NULL)  AS official_days,
+               max(trade_date) FILTER (WHERE limit_up_list_n IS NOT NULL) AS last_official
+        FROM mart_market_day
+        """
+    ).fetchall()[0]
+    check("价格口径涨停覆盖全部交易日", cov[0], cov[1], 0,
+          note=f"{cov[1]}/{cov[0]} 天，含 ST，不依赖 limit_list_d")
+    check("价格口径跌停覆盖全部交易日", cov[0], cov[2], 0, note=f"{cov[2]}/{cov[0]} 天")
+    check("炸板率与官方名单同源为空（不用近似值填充）", cov[4], cov[3], 0,
+          note=f"官方名单可用 {cov[4]} 天、最近 {cov[5]}；炸板率非空 {cov[3]} 天")
+    # 连板为价格口径：只校验派生表与明细自洽，不与官方 limit_times 对齐（口径不同，差异已写进契约）
+    self_diff = con.execute(
+        """
+        WITH f AS (
+            -- 与 build_marts 完全相同的 coalesce 约定：有样本但无涨停时 max 记 0 而不是 NULL
+            SELECT trade_date,
+                   CASE WHEN count(is_limit_up) > 0
+                        THEN count(*) FILTER (WHERE limit_streak >= 2) END AS s,
+                   CASE WHEN count(is_limit_up) > 0
+                        THEN coalesce(max(CASE WHEN is_limit_up THEN limit_streak END), 0) END AS m
+            FROM feat_stock GROUP BY trade_date
+        )
+        SELECT count(*) FROM mart_market_day mm JOIN f USING (trade_date)
+        WHERE coalesce(mm.streak_n, -1) <> coalesce(f.s, -1)
+           OR coalesce(mm.max_streak, -1) <> coalesce(f.m, -1)
+        """
+    ).fetchall()[0][0]
+    check("连板/最高板与明细自洽", 0, self_diff, 0, note="mart_market_day vs feat_stock 逐日对齐")
+    off_div = con.execute(
+        """
+        WITH off AS (
+            SELECT trade_date, count(*) FILTER (WHERE is_up AND limit_times >= 2) AS os,
+                   max(CASE WHEN is_up THEN limit_times END) AS om
+            FROM core_limit_event GROUP BY trade_date
+        )
+        SELECT round(avg(abs(mm.streak_n - off.os)), 2),
+               round(avg(abs(mm.max_streak - off.om)), 2),
+               count(*)
+        FROM mart_market_day mm JOIN off USING (trade_date)
+        WHERE mm.limit_up_list_n IS NOT NULL AND mm.streak_n IS NOT NULL
+        """
+    ).fetchall()[0]
+    print(f"  [info] 连板为价格口径，与官方 limit_times 日均差 {off_div[0]} 家 / 最高板 {off_div[1]} 板"
+          f"（{off_div[2]} 天可比）——口径不同，不与官方对齐，已写入 metric_contracts")
+    print(f"  [info] 官方涨停名单覆盖 {cov[4]}/{cov[0]} 天，最近有值 {cov[5]}；"
+          f"其余日期炸板率/封单额为空，不填充近似值")
+
+
 def audit_integrity(con, day: str) -> None:
     """批量一致性：派生表 vs 原始表 / 聚合 vs 明细。"""
     # 1) feat_stock vs core_stock_day（价格、收益、成交额、复权）
@@ -592,6 +648,8 @@ def main() -> None:
         audit_limit_method(con, day)
     else:
         skip("涨跌停事件口径", "指定日期无事件记录，不能用历史另一天冒充验证")
+    # 与具体日期无关的口径纯净性检查：始终执行
+    audit_limit_caliber(con)
     print("[6] 批量一致性")
     audit_integrity(con, day)
     print("[7] 静态 payload 一致性")

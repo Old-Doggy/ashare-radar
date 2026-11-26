@@ -126,7 +126,9 @@ export default function Today() {
       to: "/sentiment",
       spark: series.slice(-21).map((r) => r.limit_up_n),
       sparkTone: "up" as const,
-      hint: zh ? "收盘价 ≥ 涨停价 × 0.999 记为涨停" : "Close ≥ limit-up price × 0.999",
+      hint: zh
+        ? "价格口径：收盘价 ≥ 涨停价 × 0.999，含 ST。全历史无缺失；因含 ST，比交易所官方名单（不含 ST）日均多约 15 家"
+        : "Price caliber: close ≥ limit-up price × 0.999, ST included. Complete history; because ST is included it runs ~15/day above the official exchange list (which excludes ST)",
     },
     {
       label: t("metric.amount"),

@@ -203,7 +203,22 @@ export default function Sentiment() {
         <Kpi label={zh ? "涨停家数" : "Limit-ups"} value={num(last.limit_up_n)} sub={zh ? "收盘价 ≥ 涨停价" : "close ≥ limit"} hint={zh ? "用 stk_limit 的涨停价判定，不猜 10%/20%" : "Judged with stk_limit, not a fixed 10%/20%"} />
         <Kpi label={zh ? "跌停家数" : "Limit-downs"} value={num(last.limit_down_n)} sub={zh ? "收盘价 ≤ 跌停价" : "close ≤ limit"} />
         <Kpi label={zh ? "最高连板" : "Max streak"} value={`${last.max_streak ?? "—"}`} sub={`${num(last.streak_n)} ${zh ? "家连板" : "with 2+ boards"}`} />
-        <Kpi label={zh ? "炸板率" : "Broken rate"} value={zhaban === null ? "—" : ratio(zhaban, 1)} sub={`${num(last.broken_n)} ${zh ? "家炸板" : "broken"}`} hint={zh ? "炸板 /（官方涨停 + 炸板），官方口径不含 ST" : "broken / (official limit-ups + broken), official universe excludes ST"} />
+        <Kpi
+          label={zh ? "炸板率" : "Broken rate"}
+          value={zhaban === null ? "—" : ratio(zhaban, 1)}
+          sub={
+            zhaban === null
+              ? zh
+                ? "官方名单数据源不可用"
+                : "official list unavailable"
+              : `${num(last.broken_n)} ${zh ? "家炸板" : "broken"}`
+          }
+          hint={
+            zh
+              ? "炸板 /（官方涨停 + 炸板），官方口径不含 ST。该指标依赖 Tushare limit_list_d，无权限日期为空——不用价格口径顶替，避免与交易所名单对不上"
+              : "broken / (official limit-ups + broken); official universe excludes ST. Needs Tushare limit_list_d and is blank when unavailable — deliberately not substituted with a price-caliber proxy"
+          }
+        />
       </div>
 
       <div className="mt-1 flex items-center justify-between">
