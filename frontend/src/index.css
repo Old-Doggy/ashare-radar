@@ -7,6 +7,32 @@
 @import "@fontsource/noto-serif-sc/600.css";
 @import "@fontsource/noto-serif-sc/700.css";
 
+/* ------------------------------------------------------------
+   Tailwind v4 的破坏性变更：<button> 的默认光标从 pointer 改成了 default
+   （upgrade guide: "buttons use the default cursor"）。
+   本项目有大量 <button> 当作交互控件，缺了手型会让人以为点不动。
+   这里统一回手型；禁用态明确为 not-allowed。
+   注意：utilities 层在 base 之后，所以 `disabled:cursor-default` 之类的工具类仍能覆盖它。
+   ------------------------------------------------------------ */
+@layer base {
+  button,
+  [role="button"],
+  summary,
+  label[for],
+  select,
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="range"] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  input:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+}
+
 /* ============================================================
    Ashare Radar design tokens · v3 "Quiet Terminal"
    C skeleton + B editorial + A discipline
