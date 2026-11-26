@@ -13,7 +13,8 @@ globalThis.window = { location: { search: "" } };
 globalThis.localStorage = { getItem: () => null };
 const output = join(temporary, "index.mjs");
 const frontend = dirname(dirname(fileURLToPath(import.meta.url)));
-const entries = ["charts", "charts2", "charts3", "charts4", "regime", "theme"];
+// charts6 必须显式加进来：这个测试硬编码模块清单，不加的话新模块根本不会被检查。
+const entries = ["charts", "charts2", "charts3", "charts4", "charts6", "regime", "theme"];
 for (const name of [...entries, "format", "html"]) {
   const source = readFileSync(join(frontend, "src", "lib", `${name}.ts`), "utf8");
   const result = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
@@ -100,6 +101,53 @@ test("undefined dispersion and EW-CW gap never render as observed zero", () => {
   assert.equal(option.series[0].data[0], null);
   assert.equal(option.series[1].data[0], null);
   assert.ok(option.tooltip.formatter([{ dataIndex: 0 }]).includes("—"));
+});
+
+test("rotation frame renders empty and all-null data through ECharts without NaN", () => {
+  const band = { x0: -1, x1: 1, y0: 0, y1: 100 };
+  const base = charts.rotationBase(p, band, 10, "en");
+  const empty = charts.rotationFrame(p, {
+    bubbles: [],
+    focus: -1,
+    hover: -1,
+    labelIdx: new Set(),
+    trail: { dots: [], line: [] },
+    ghost: null,
+    current: null,
+    focusName: "",
+  });
+  const holes = charts.rotationFrame(p, {
+    bubbles: [{ name: "Synthetic", coord: null, ret: null, breadth: null, rank: null, weight: 0 }],
+    focus: 0,
+    hover: -1,
+    labelIdx: new Set([0]),
+    trail: { dots: [], line: [] },
+    ghost: null,
+    current: null,
+    focusName: "Synthetic",
+  });
+  for (const frame of [empty, holes]) {
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 800, height: 400 });
+    try {
+      chart.setOption(base);
+      chart.setOption({ series: frame });
+      const svg = chart.renderToSVGString();
+      assert.ok(svg.startsWith("<svg"));
+      assert.ok(!svg.includes("NaN"));
+    } finally {
+      chart.dispose();
+    }
+  }
+});
+
+test("rotation tooltip escapes upstream sector names", () => {
+  const malicious = '<img src=x onerror="alert(1)">';
+  const base = charts.rotationBase(p, { x0: -1, x1: 1, y0: 0, y1: 100 }, 10, "en");
+  const html = base.tooltip.formatter({ data: { name: malicious, idx: 0, ret: 0.01, breadth: 0.5, rank: 3 } });
+  assert.ok(!html.includes("<img"));
+  assert.ok(html.includes("&lt;img"));
+  const dim = base.tooltip.formatter({ data: { name: malicious, dim: true } });
+  assert.ok(!dim.includes("<img"));
 });
 
 test("corrected chart options render through ECharts without errors", () => {

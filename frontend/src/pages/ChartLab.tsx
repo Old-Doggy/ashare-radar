@@ -1,7 +1,7 @@
 import { escapeHtml } from "../lib/html";
 import { cumulativePath } from "../lib/viewMetrics";
 import { DataState } from "../components/DataState";
-﻿import { useMemo, type ReactNode } from "react";
+﻿import { useMemo, useState, type ReactNode } from "react";
 import type { EChartsOption } from "echarts";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -14,8 +14,10 @@ import { treemapChart } from "../lib/charts2";
 import { PageHead } from "../components/PageHead";
 import { Card } from "../components/Card";
 import EChart from "../components/EChart";
+import { RotationPanel } from "../components/RotationPanel";
+import { RotationDataState } from "../components/RotationDataState";
 
-type Demo = "regime" | "regime-hex" | "tape" | "bubble" | "distribution" | "treemap" | "multiples";
+type Demo = "regime" | "regime-hex" | "tape" | "bubble" | "distribution" | "treemap" | "multiples" | "rotation";
 
 const mix = (a: string, b: string, t: number) => {
   const A = a.replace("#", "");
@@ -467,7 +469,7 @@ function MiniPath({ values, score, color }: { values: (number | null)[]; score: 
 }
 
 export default function ChartLab() {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const zh = lang === "zh";
   const { theme, colorblind } = useUI();
@@ -481,6 +483,14 @@ export default function ChartLab() {
   const { data: stocks } = useQuery({ queryKey: ["lab-stocks", d], queryFn: () => api.stocks(d as string), enabled: !!d });
   const { data: distribution } = useQuery({ queryKey: ["lab-dist", d], queryFn: () => api.distribution(d as string), enabled: !!d });
   const { data: monthly } = useQuery({ queryKey: ["lab-monthly"], queryFn: () => api.sectorMonthly() });
+  // P4 验收：轮动图先接进 /labs?demo=rotation 渲染；/sectors 的正式接入在 P5。
+  const { data: roll, error: rollError, isPending: rollPending } = useQuery({
+    queryKey: ["sector-roll", d],
+    queryFn: () => api.sectorRoll(),
+    enabled: only === "rotation",
+    retry: false,
+  });
+  const [labSector, setLabSector] = useState<string | null>(null);
 
   const rows = (market ?? []).filter((r) => r.breadth != null && Number.isFinite(r.breadth));
   const small = useMemo(() => {
@@ -497,6 +507,55 @@ export default function ChartLab() {
     }).filter((row): row is { name: string; values: (number | null)[]; score: number } => row.score != null).sort((a, b) => b.score - a.score);
     return { top: all.slice(0, 6), bottom: all.slice(-6).reverse() };
   }, [monthly]);
+
+  if (only === "rotation") {
+    return (
+      <div className="flex flex-col gap-3.5">
+        <PageHead
+          kicker={`DEMO / ${zh ? "轮动强度云" : "Rotation cloud"} / ${meta?.last_trade_date ?? "—"}`}
+          title={zh ? "行业强度云 · 连播" : "Sector strength cloud · playback"}
+          dek={
+            zh
+              ? "位置为平滑后坐标、数字为原始值；空格播放/暂停，← → 单日步进，Esc 退出播放。"
+              : "Positions are smoothed; every number is raw. Space toggles playback, ← → step one day, Esc stops."
+          }
+          chips={
+            <>
+              <span className="pill">{zh ? "滚动 5/10/20 条行业观测" : "5/10/20 sector observations"}</span>
+              <span className="pill">{zh ? "窗口 30/60/120" : "window 30/60/120"}</span>
+            </>
+          }
+          right={
+            <Link to="/sectors?mode=rot" className="text-[12px] text-[var(--accent)] hover:underline">
+              {zh ? "在行业页查看 →" : "Open in Sectors →"}
+            </Link>
+          }
+        />
+        <Card
+          index="07"
+          title={zh ? "行业强度云" : "Sector strength cloud"}
+          subtitle={t("rotate.subtitle")}
+          padded={false}
+          bodyClass="pt-0"
+          footer={
+            <div className="provline">
+              <span>SOURCE <b>mart_sector_roll</b></span>
+              <span>{roll?.length ?? "—"} {zh ? "行" : "rows"}</span>
+              <span className="r">{zh ? "排名取原始列" : "raw ranks"}</span>
+            </div>
+          }
+        >
+          <div className="h-[560px] px-1 pb-2">
+            {roll?.length ? (
+              <RotationPanel rows={roll} p={p} lang={lang} selected={labSector} onSelect={setLabSector} />
+            ) : (
+              <RotationDataState error={rollError} pending={rollPending} />
+            )}
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   if (!rows.length) return <DataState error={marketError} loading={marketPending} />;
 

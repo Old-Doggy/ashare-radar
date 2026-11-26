@@ -4,6 +4,18 @@
 import { finiteQuantity, validCode } from "./holdings";
 const BASE = "";
 
+class ApiError extends Error {
+  constructor(readonly status: number, statusText: string) {
+    super(`${status} ${statusText}`);
+  }
+}
+
+export class SectorRollUnavailable extends Error {
+  constructor(readonly reason: "offline" | "rebuild") {
+    super(reason === "offline" ? "Offline export has no rolling sector data" : "Sector rolling table needs rebuilding");
+  }
+}
+
 async function get<T>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
   const qs = params
     ? "?" +
@@ -13,7 +25,7 @@ async function get<T>(path: string, params?: Record<string, string | number | un
         .join("&")
     : "";
   const res = await fetch(`${BASE}${path}${qs}`);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw new ApiError(res.status, res.statusText);
   return (await res.json()) as T;
 }
 
@@ -220,6 +232,23 @@ export interface SectorRank {
   ret20?: number;
 }
 
+/** 轮动滚动指标（mart_sector_roll）：ret/br 是小数，rank 是整数名次（1=最强）。
+ *  `amount` 由后端 JOIN mart_sector_day 带回（单位：元），仅用于气泡面积/成交额展示。 */
+export interface SectorRollDay {
+  trade_date: string;
+  sw_l1: string;
+  ret_r5: number | null;
+  ret_r10: number | null;
+  ret_r20: number | null;
+  br_r5: number | null;
+  br_r10: number | null;
+  br_r20: number | null;
+  rank_r5: number | null;
+  rank_r10: number | null;
+  rank_r20: number | null;
+  amount?: number | null;
+}
+
 export interface LimitQuality {
   trade_date: string;
   fd_ratio: number | null;
@@ -255,6 +284,7 @@ export interface StaticPayload {
   sector_monthly: SectorMonth[];
   rotation?: RotationDay[];
   sector_ranks?: SectorRank[];
+  sector_roll?: SectorRollDay[] | null;
   contrib: Record<string, Contributor[]>;
   distribution: Record<string, Distribution>;
   stocks: StockRow[];
@@ -382,6 +412,18 @@ export const api = {
   reconcile: () => (S ? ok(S.reconcile ?? null) : get<Reconcile | null>("/api/reconcile")),
 
   sectorRanks: () => (S ? ok(S.sector_ranks ?? []) : get<SectorRank[]>("/api/sector-ranks")),
+
+  /** 滚动强度序列（轮动图取数）。旧离线包没有这份数据时必须明确报缺失，不能画空图。 */
+  sectorRoll: (start?: string, end?: string) => {
+    if (S) {
+      if (S.sector_roll == null) throw new SectorRollUnavailable("offline");
+      return ok(S.sector_roll.filter((r) => inRange(r.trade_date, start, end)));
+    }
+    return get<SectorRollDay[]>("/api/sectors/roll", { start, end }).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status === 409) throw new SectorRollUnavailable("rebuild");
+      throw error;
+    });
+  },
 
   stocks: (date: string, sector?: string, limit = 6000) => {
     if (S) {

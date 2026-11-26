@@ -44,3 +44,11 @@ test('offline detail and sector history cannot silently return unprovided sample
   assert.throws(()=>api.marketDay(day.trade_date));
   assert.throws(()=>api.sectors('2020-01-01'));
 });
+test('offline rotation distinguishes an absent dataset from a dataset with no matching rows',async()=>{
+  for (const data of [undefined, null]) {
+    const api=await staticApi({...payload(),sector_roll:data});
+    assert.throws(()=>api.sectorRoll(), {reason:'offline'});
+  }
+  const api=await staticApi({...payload(),sector_roll:[day]});
+  assert.deepEqual(await api.sectorRoll('2026-07-01'), []);
+});

@@ -14,6 +14,9 @@ import EChart, { type EChartHandle } from "../components/EChart";
 import { Card } from "../components/Card";
 import { MonthlyGrid } from "../components/MonthlyGrid";
 import { DataState } from "../components/DataState";
+import { Segmented } from "../components/Segmented";
+import { RotationPanel, type RotationPanelHandle } from "../components/RotationPanel";
+import { RotationDataState } from "../components/RotationDataState";
 import { cumulativePath, median } from "../lib/viewMetrics";
 import { PageHead } from "../components/PageHead";
 
@@ -24,8 +27,16 @@ export default function Sectors() {
   const { theme, colorblind } = useUI();
   const p = paletteFor(theme, colorblind);
   const chartRef = useRef<EChartHandle>(null);
+  const rotRef = useRef<RotationPanelHandle>(null);
   const [params, setParams] = useSearchParams();
   const sel = params.get("sector");
+  const mode: "day" | "rot" = params.get("mode") === "rot" ? "rot" : "day";
+  const setMode = (m: "day" | "rot") => {
+    const next = new URLSearchParams(params);
+    if (m === "rot") next.set("mode", "rot");
+    else next.delete("mode");
+    setParams(next, { replace: true });
+  };
   const setSel = (s: string | null) => {
     const next = new URLSearchParams(params);
     if (s) next.set("sector", s);
@@ -44,6 +55,13 @@ export default function Sectors() {
   const { data: monthly } = useQuery({ queryKey: ["sector-monthly"], queryFn: () => api.sectorMonthly() });
   const { data: rotation } = useQuery({ queryKey: ["rotation"], queryFn: api.rotation });
   const { data: ranks } = useQuery({ queryKey: ["sector-ranks"], queryFn: api.sectorRanks });
+  // 轮动模式：滚动强度序列（后端默认最近 250 个交易日），只在轮动模式取数
+  const { data: roll, error: rollError, isPending: rollPending } = useQuery({
+    queryKey: ["sector-roll", d],
+    queryFn: () => api.sectorRoll(),
+    enabled: mode === "rot" && !!d,
+    retry: false,
+  });
   const { data: allStocks } = useQuery({
     queryKey: ["stocks-all", d],
     queryFn: () => api.stocks(d as string),
@@ -58,6 +76,15 @@ export default function Sectors() {
   const rows = sectors ?? [];
   const selected = sel ?? rows[0]?.sw_l1 ?? null;
   const selRow = rows.find((r) => r.sw_l1 === selected) as SectorDay | undefined;
+  // F6-6：导出前先暂停（exportPng 内部同步 pause rAF），轮动模式下取 LiveChart 当前帧
+  const exportPng = () => {
+    if (mode === "rot") {
+      const frame = rotRef.current?.exportPng(p.bg);
+      if (frame) downloadDataUrl(frame.url, `ashare-radar_sector-rotation_${frame.date}.png`);
+      return;
+    }
+    downloadDataUrl(chartRef.current?.getDataURL(p.bg) ?? null, `ashare-radar_sectors_${d ?? ""}.png`);
+  };
 
   const [heatWindow, setHeatWindowState] = useState<12 | 24>(params.get("hm") === "24" ? 24 : 12);
   const [heatScope, setHeatScopeState] = useState<"focus" | "all">(params.get("hs") === "all" ? "all" : "focus");
@@ -167,54 +194,87 @@ export default function Sectors() {
         <div className="col-span-12 xl:col-span-8">
           <Card
             index="01"
-            title={zh ? "收益 × 广度" : "Return × breadth"}
-            subtitle={zh ? "横轴 = 行业等权收益 · 纵轴 = 上涨占比 · 气泡 = 成交额 · 四象限：普涨 / 集中 / 普跌 / 分化" : "Bubble = turnover · quadrants at 0% / 50% · click to drill in"}
+            title={mode === "rot" ? t("rotate.title") : zh ? "收益 × 广度" : "Return × breadth"}
+            subtitle={
+              mode === "rot"
+                ? t("rotate.subtitle")
+                : zh
+                  ? "横轴 = 行业等权收益 · 纵轴 = 上涨占比 · 气泡 = 成交额 · 四象限：普涨 / 集中 / 普跌 / 分化"
+                  : "Bubble = turnover · quadrants at 0% / 50% · click to drill in"
+            }
             right={
-              <div className="flex items-center gap-2.5 text-[10.5px] text-[var(--faint)]">
-                {[
-                  { c: p.up, l: `${zh ? "普涨" : "Broad"} ${quadCounts.broad}` },
-                  { c: p.copper, l: `${zh ? "集中" : "Narrow"} ${quadCounts.narrow}` },
-                  { c: p.down, l: `${zh ? "普跌" : "Selloff"} ${quadCounts.selloff}` },
-                  { c: p.muted, l: `${zh ? "分化" : "Mixed"} ${quadCounts.mixed}` },
-                ].map((q) => (
-                  <span key={q.l} className="flex items-center gap-1">
-                    <i className="inline-block h-[6px] w-[6px] rounded-full" style={{ background: q.c }} />
-                    {q.l}
-                  </span>
-                ))}
+              <div className="flex flex-wrap items-center justify-end gap-2.5 text-[10.5px] text-[var(--faint)]">
+                <Segmented
+                  options={[
+                    { value: "day", label: t("rotate.modeDay") },
+                    { value: "rot", label: t("rotate.modeRot") },
+                  ]}
+                  value={mode}
+                  onChange={setMode}
+                />
+                {mode === "day"
+                  ? [
+                      { c: p.up, l: `${zh ? "普涨" : "Broad"} ${quadCounts.broad}` },
+                      { c: p.copper, l: `${zh ? "集中" : "Narrow"} ${quadCounts.narrow}` },
+                      { c: p.down, l: `${zh ? "普跌" : "Selloff"} ${quadCounts.selloff}` },
+                      { c: p.muted, l: `${zh ? "分化" : "Mixed"} ${quadCounts.mixed}` },
+                    ].map((q) => (
+                      <span key={q.l} className="flex items-center gap-1">
+                        <i className="inline-block h-[6px] w-[6px] rounded-full" style={{ background: q.c }} />
+                        {q.l}
+                      </span>
+                    ))
+                  : null}
                 <button
-                  onClick={() => downloadDataUrl(chartRef.current?.getDataURL(p.bg) ?? null, `ashare-radar_sectors_${d ?? ""}.png`)}
+                  onClick={exportPng}
+                  disabled={mode === "rot" && !roll?.length}
                   className="ml-1 h-[27px] rounded border border-[var(--border)] px-2 font-mono text-[11px] text-[var(--faint)] hover:text-[var(--text)]"
                 >
                   PNG
                 </button>
               </div>
             }
-            prov={zh ? "横轴行业等权收益，纵轴行业内上涨占比，气泡面积按成交额" : "x = EW return, y = breadth, size = turnover"}
+            prov={
+              mode === "rot"
+                ? t("rotate.hint")
+                : zh
+                  ? "横轴行业等权收益，纵轴行业内上涨占比，气泡面积按成交额"
+                  : "x = EW return, y = breadth, size = turnover"
+            }
             padded={false}
             bodyClass="pt-0"
             footer={
               <div className="provline">
-                <span>SOURCE <b>daily / sw_daily</b></span>
-                <span>N <b>{rows.length}</b></span>
-                <span>{zh ? "申万一级" : "SW L1"}</span>
+                <span>SOURCE <b>{mode === "rot" ? "mart_sector_roll" : "daily / sw_daily"}</b></span>
+                <span>N <b>{mode === "rot" ? `${roll?.length ?? "—"} ${zh ? "行" : "rows"}` : rows.length}</b></span>
+                <span>{mode === "rot" ? (zh ? "排名取原始列" : "raw ranks") : zh ? "申万一级" : "SW L1"}</span>
                 <a className="r hover:underline" href="#/about">{zh ? "口径说明 →" : "Method →"}</a>
               </div>
             }
           >
-            <div className="h-[360px] px-1 pb-1 md:h-[420px] md:px-2">
-              <EChart
-                ref={chartRef}
-                option={sectorBubble(p, rows, lang, selected)}
-                onEvents={{
-                  click: (params: unknown) => {
-                    const name = (params as { data?: { name?: string } })?.data?.name;
-                    if (name) setSel(name);
-                  },
-                }}
-                ariaLabel={zh ? "行业收益与广度气泡图" : "Sector return vs breadth"}
-              />
-            </div>
+            {mode === "day" ? (
+              <div className="h-[360px] px-1 pb-1 md:h-[420px] md:px-2">
+                <EChart
+                  ref={chartRef}
+                  option={sectorBubble(p, rows, lang, selected)}
+                  onEvents={{
+                    click: (params: unknown) => {
+                      const name = (params as { data?: { name?: string } })?.data?.name;
+                      if (name) setSel(name);
+                    },
+                  }}
+                  ariaLabel={zh ? "行业收益与广度气泡图" : "Sector return vs breadth"}
+                />
+              </div>
+            ) : roll?.length ? (
+              <div className="h-[540px] md:h-[610px]">
+                <RotationPanel ref={rotRef} rows={roll} p={p} lang={lang} selected={selected} onSelect={setSel} />
+              </div>
+            ) : (
+              <div className="h-[300px]">
+                <RotationDataState error={rollError} pending={rollPending} />
+              </div>
+            )}
           </Card>
         </div>
 
