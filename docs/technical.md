@@ -13,6 +13,7 @@ data/lake.duckdb
         ▼
 feat_stock（复权、均线、新高、涨跌停、连板）
 mart_market_day / mart_sector_day / mart_sector_month / mart_stock_latest
+                    └──► mart_sector_roll（按行业观测行计算滚动窗口）
         ▼
 Flask API ──► React + ECharts（深/浅主题、中/英）
         └──► export_static.py ──► 单文件 HTML
@@ -27,12 +28,13 @@ Flask API ──► React + ECharts（深/浅主题、中/英）
 | 今日盘面 | 当日结论、5 个 KPI、收益×广度、贡献 Top5 |
 | 市场结构 | 收益/广度序列、集中度、分化度 |
 | 市场状态 | 四象限散点、30 日轨迹、状态持续与后续统计 |
-| 行业参与 | 气泡、累计收益、排名迁移、轮动强度 |
+| 行业参与 | 当日气泡、行业强度云连播、累计收益、排名迁移、轮动强度 |
 | 个股分化 | 市值×收益、收益分布、明细表、K 线、PE 分位 |
 | 情绪极端 | 涨跌停、连板、新高新低、封板质量、两融 |
 | 自选组合 | 行业暴露、盈亏贡献、持仓明细、CSV |
 | 方法与数据 | 血缘、质量门禁、更新日志、源间对账 |
-| `/labs` | 图表实验页（hexbin、treemap、渐变云图等） |
+| `/labs` | 图表实验页，`#/labs?demo=rotation` 可单独查看行业强度云 |
+| `/briefing` | A4 每日简报，图表动画关闭 |
 
 ## 更新链路
 
@@ -46,6 +48,8 @@ Flask API ──► React + ECharts（深/浅主题、中/英）
 6. `export_static` 重新生成单文件
 
 `pipeline.release` 是 API/Windows 共用完整入口；`--rebuild` 仅验质、重建和导出。逐数据集记录完成状态，重查近20个交易日及旧缺口；两融/资金流/事件另行回补。Windows 工作日17:35触发，周日02:00重建；任务账户应使用上海时区。
+
+`GET /api/sectors/roll` 返回滚动强度和展示用当日成交额。显式传 `start` 可查询更长区间，只有 `end` 时取截止该日最近 250 个有滚动行的交易日。非法日期或反向范围返回 400，合法空区间返回 200 `[]`，旧库缺表返回 409 并提示重建。静态包带最近 250 日，缺表时其余页面仍可导出，行业强度云提示重建后重新导出。
 
 Windows 下双击 `start.bat` 启动 Web 端：脚本验证解释器、复用已运行服务、必要时构建前端并打开浏览器；`stop.bat` 停止。端口可用 `ASHARE_RADAR_PORT` 覆盖（默认 8000）。
 

@@ -20,6 +20,7 @@
 ## 特性
 
 - 广度、集中度、行业、个股、情绪、持仓六类视图
+- 行业页「轮动」播放行业强度云，比较每个行业最近 5、10、20 条日度观测的累计等权收益和平均上涨占比
 - 每日更新 + 14 条质量门禁；当日收盘后可降级到 akshare，历史补数仍需主源
 - 中英双语、深/浅主题、色盲配色、URL 状态、PNG/CSV 导出
 - 支持导出单文件 HTML，离线打开
@@ -66,6 +67,7 @@ python -m pipeline.export_static
 ```
 
 后续每日发布使用 `python -m pipeline.release`；只重建用 `python -m pipeline.release --rebuild`。
+从 v0.3.0 升级后，先构建新前端，再执行 `python -m pipeline.release --rebuild`，生成滚动表与新版离线包。旧库仍可打开当日行业图。详见[发布说明](docs/release.md)。
 更新任务、API 按钮和 Windows 脚本共用发布链。失败保留旧 HTML，浏览器已打开的离线包不会自动收到新告警。
 本轮已修复前后端错数路径，并在数据库副本完成历史补数与实际验收；未替换原库或原发布文件。修复、证据与数据源限制见 [最终交付报告](docs/release_completion_report.md)。
 

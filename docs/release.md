@@ -1,6 +1,6 @@
 # 发布说明（GitHub）
 
-> 以下完成勾选属于旧版本记录。当前候选版本的修复与验收以 [最终交付报告](release_completion_report.md) 为准，不能用下方历史勾选放行。
+当前发布候选版本为 **v0.4.0**，新增行业强度云。审核结果见 [v0.4.0 终审](release_review_v0.4.0.md)。上一版 `v0.3.0` 已发布。
 
 ## 1. 仓库名
 
@@ -18,41 +18,23 @@
 
 `a-share` `tushare` `market-breadth` `duckdb` `echarts` `dashboard` `quant` `data-visualization`
 
-## 4. 推送前检查（已全部通过）
+## 4. 推送与发布检查
 
-- [x] `pytest` 15 passed
-- [x] `ruff` E9/F63/F7/F82 通过
-- [x] E2E 7 步通过（`frontend/scripts/e2e.mjs`）
-- [x] P2 验证：PNG/CSV 按钮、色盲模式、URL 状态（`frontend/scripts/verify_p2.mjs`）
-- [x] `.env` 未入库；`data/`、`frontend/dist/` 已忽略
-- [x] `LICENSE`（MIT）、`.gitattributes`
-- [x] 工作区干净
+1. 运行 `python -m pytest` 和 `ruff check --select E9,F63,F7,F82 .`，再在 `frontend` 执行 `npm ci` 与 `npm run check`。
+2. 在数据库副本验证 `python -m pipeline.release --rebuild`。该入口依次验质、重建分析表和导出。运行 `python scripts/audit_all.py --lake <副本路径> --offline` 确认滚动表和静态包一致。
+3. 检查变更清单，提交源代码、回归测试和文档。将验证产物保留在临时目录。
+4. 推送源码后等待 GitHub Actions 通过，在已验证的提交上创建 `v0.4.0` tag 和 Release。
 
-## 5. 推送命令
+## 5. 部署已发布的版本
 
-```powershell
-cd ashare-radar
-git remote add origin git@github.com:<用户名>/ashare-radar.git
-git branch -M main
-git push -u origin main
-git tag -a v0.2.0 -m "v0.2.0: holdings, rotation, k-line, seal quality, colorblind, export"
-git push origin v0.2.0
-```
+**构建会清空 `frontend/dist/`。** `npm run check` 也包含构建。请在最后一次构建之后导出，并确认 `frontend/dist/ashare-radar.html` 存在。
 
-若用 HTTPS：
+1. 更新代码和依赖，在 `frontend` 执行 `npm ci` 和 `npm run build`。
+2. 回到仓库根目录执行 `python -m pipeline.release --rebuild`。旧库可继续浏览既有页面，行业强度云需本步生成 `mart_sector_roll`。如果存在未解决的行情更新失败，先完成 `python -m pipeline.release` 并检查门禁再发布。
+3. 重启 Flask。检查 `/api/sectors/roll` 返回含数据的 200，并打开 `#/sectors?mode=rot` 与新导出的 `frontend/dist/ashare-radar.html`。
+4. Windows 每日更新、周日重建继续使用原发布入口，本次无需调整任务时间。原有任务账号和解释器需能运行更新后的依赖。
 
-```powershell
-git remote add origin https://github.com/<用户名>/ashare-radar.git
-```
-
-## 6. 推送后
-
-1. GitHub → Settings → Actions：确认 CI 跑通（ruff + pytest + web build）
-2. 仓库 About 填入描述与 topics
-3. Release 用 `v0.2.0`，正文可直接引用 `README.md` 的 v0.2 新增段
-4. 若公开数据截图，确认 `docs/screenshots/` 不含个人信息（当前仅行情与自选示例）
-
-## 7. 不随仓库分发的内容
+## 6. 不随仓库分发的内容
 
 - `data/`（DuckDB、parquet、快照、简报）——体积大且含行情数据
 - `.env`（Tushare token）

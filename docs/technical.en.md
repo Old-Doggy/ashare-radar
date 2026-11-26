@@ -1,5 +1,7 @@
 # Technical notes
 
+v0.4.0 adds the sector strength cloud. The Sectors rotation view and `#/labs?demo=rotation` read `mart_sector_roll` through `/api/sectors/roll` or the offline export. For the metric contract, supported ranges and old-database behavior, see [Technical notes in Chinese](technical.md) and [metric contracts](metric_contracts.md).
+
 > The older sections below describe the pre-audit release. The current pipeline has fourteen gates, per-day rollback, OS-owned publication locking and atomic HTML replacement. API updates call `pipeline.release`; failure preserves the previous HTML, and existing offline copies cannot receive future alerts. See [current technical notes](technical.md), [ADR-11](decisions/ADR-11-release-integrity.md) and the [repair report](release_fix_report.md). Frontend fixes, historical repairs on a database copy and actual browser validation are documented in the [completion report](release_completion_report.md).
 
 ## Architecture

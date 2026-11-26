@@ -20,6 +20,7 @@ Computes breadth, equal- and cap-weighted returns, concentration, sector partici
 ## Features
 
 - Six view families: breadth, concentration, sectors, stocks, sentiment and holdings
+- The Rotation view plays the sector strength cloud using each sector's last 5, 10 or 20 daily observations for cumulative equal-weight returns and average breadth
 - Daily updates with fourteen quality gates; current-day post-close akshare fallback
 - Chinese/English UI, dark/light themes, colorblind palette, URL state, PNG/CSV export
 - Single-file HTML build for offline use
@@ -66,6 +67,7 @@ python -m pipeline.export_static
 ```
 
 Use `python -m pipeline.release` for daily publication, or add `--rebuild` to rebuild only.
+When upgrading from v0.3.0, build the new frontend first and run `python -m pipeline.release --rebuild` to create the rolling table and refresh the offline file. See the [release instructions](docs/release.md).
 Failed publication preserves the previous HTML. Existing offline copies cannot receive later alerts.
 Frontend and backend fixes and historical repairs were validated against an isolated database copy. Original data and release artifacts were preserved. See the [completion report](docs/release_completion_report.md) for evidence and remaining source limitations.
 
