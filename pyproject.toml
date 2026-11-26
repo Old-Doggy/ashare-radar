@@ -1,6 +1,6 @@
 [project]
 name = "ashare-radar"
-version = "0.4.1"
+version = "0.4.2"
 description = "A-share market structure terminal: breadth, concentration, sector participation, dispersion"
 requires-python = ">=3.12"
 license = { text = "MIT" }
