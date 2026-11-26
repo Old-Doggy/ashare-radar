@@ -48,6 +48,8 @@ const ZoomChart = forwardRef<ZoomChartHandle, Props>(function ZoomChart(
   const instRef = useRef<ECharts | null>(null);
   const winRef = useRef<[number, number] | null>(null);
   const tweenRaf = useRef<number | null>(null);
+  const lastDown = useRef(0);
+  const lastPos = useRef<[number, number]>([0, 0]);
 
   const cancelTween = useCallback(() => {
     if (tweenRaf.current !== null) {
@@ -65,16 +67,33 @@ const ZoomChart = forwardRef<ZoomChartHandle, Props>(function ZoomChart(
       if (win) winRef.current = win;
     };
     inst.on("dataZoom", onZoom);
-    // 用户自己滚轮 / 拖拽时立刻停掉进行中的窗口动画，避免和用户抢
+    // 双击复位：浏览器原生 dblclick 会被 ECharts 的 DOM 处理器吞掉（实测外层容器收到 0 次），
+    // zrender 的 dblclick 事件也不可靠，所以在 mousedown 上自己判双击（320ms 内、位移 < 6px）。
+    const onDown = (e: unknown) => {
+      cancelTween();
+      const ev = e as { offsetX?: number; offsetY?: number };
+      const x = ev.offsetX ?? 0;
+      const y = ev.offsetY ?? 0;
+      const now = Date.now();
+      const double =
+        now - lastDown.current < 320 && Math.hypot(x - lastPos.current[0], y - lastPos.current[1]) < 6;
+      if (double) {
+        lastDown.current = 0;
+        const cur = instRef.current;
+        if (cur && !cur.isDisposed()) applyWindow(cur, 0, 100, 320);
+      } else {
+        lastDown.current = now;
+        lastPos.current = [x, y];
+      }
+    };
     const zr = inst.getZr();
-    const onUserInteract = () => cancelTween();
-    zr.on("mousewheel", onUserInteract);
-    zr.on("mousedown", onUserInteract);
+    zr.on("mousedown", onDown);
+    zr.on("mousewheel", cancelTween);
     return () => {
       if (!inst.isDisposed()) {
         inst.off("dataZoom", onZoom);
-        zr.off("mousewheel", onUserInteract);
-        zr.off("mousedown", onUserInteract);
+        zr.off("mousedown", onDown);
+        zr.off("mousewheel", cancelTween);
       }
       if (instRef.current === inst) instRef.current = null;
       winRef.current = null;
