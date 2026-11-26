@@ -40,7 +40,7 @@ function Cluster({
 }) {
   return (
     <div className={`items-center gap-1.5 ${className}`}>
-      <span className="shrink-0 whitespace-nowrap font-mono text-[9.5px] uppercase tracking-[0.06em] text-[var(--faint)]">
+      <span className="shrink-0 whitespace-nowrap font-mono text-[11px] tracking-[0.02em] text-[var(--faint)]">
         {label}
       </span>
       <div className="flex items-center gap-[2px] rounded-[7px] border border-[var(--border-strong)] bg-[var(--surface)] p-px">
@@ -52,14 +52,14 @@ function Cluster({
 
 const optClass = (active: boolean) =>
   [
-    "rounded-[5px] px-[5px] py-[4px] text-[11.5px] leading-none transition-colors",
+    "rounded-[5px] px-[7px] py-[5px] text-[12.5px] leading-none transition-colors",
     active
       ? "bg-[var(--surface-3)] font-medium text-[var(--text)] shadow-[inset_0_0_0_1px_var(--border-strong)]"
       : "text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text-2)]",
   ].join(" ");
 
 const ctrlClass =
-  "grid h-[26px] min-w-[26px] place-items-center rounded-[5px] px-[7px] text-[11.5px] leading-none " +
+  "grid h-[28px] min-w-[28px] place-items-center rounded-[5px] px-[8px] text-[12.5px] leading-none " +
   "text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--text)]";
 
 /** 播放控制条。
@@ -89,7 +89,7 @@ export function PlaybackBar({
         <button
           onClick={onToggle}
           aria-pressed={playing}
-          className="inline-flex h-[30px] items-center gap-1.5 rounded-[6px] bg-[var(--text)] px-3 text-[12px] font-semibold text-[var(--panel)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--panel)]"
+          className="inline-flex h-[32px] items-center gap-1.5 rounded-[6px] bg-[var(--text)] px-3.5 text-[13.5px] font-semibold text-[var(--panel)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--panel)]"
         >
           <span aria-hidden>{playing ? "❚❚" : "▶"}</span>
           {playing ? t("rotate.pause") : t("rotate.play")}
@@ -105,7 +105,7 @@ export function PlaybackBar({
           <span className="h-[14px] w-px shrink-0 bg-[var(--border-strong)]" aria-hidden />
           <button
             onClick={onReplay}
-            className="inline-flex h-[26px] items-center gap-1.5 rounded-[5px] px-2 text-[11.5px] leading-none text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
+            className="inline-flex h-[28px] items-center gap-1.5 rounded-[5px] px-2 text-[12.5px] leading-none text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
             aria-label={t("rotate.replay")}
           >
             <span aria-hidden>⏮</span>
@@ -133,7 +133,7 @@ export function PlaybackBar({
             aria-label={t("rotate.position")}
             aria-valuetext={`${Math.round(pos) + 1} / ${n}`}
           />
-          <span className="mono shrink-0 text-[10.5px] text-[var(--faint)]">
+          <span className="mono shrink-0 text-[11.5px] text-[var(--faint)]">
             {Math.round(pos) + 1} / {n}
           </span>
           <span className="sr-only" aria-live="polite">
@@ -150,14 +150,14 @@ export function PlaybackBar({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-3 py-2 md:px-4">
           {groups.map((g, i) => (
             <Fragment key={g.label}>
-              {i === 3 && <span aria-hidden className="h-0 basis-full @min-[900px]:hidden" />}
+              {i === 3 && <span aria-hidden className="h-0 basis-full @min-[1040px]:hidden" />}
               {i > 0 && i !== 3 && (
-                <span aria-hidden className="h-[15px] w-px shrink-0 bg-[var(--border-strong)]" />
+                <span aria-hidden className="h-[16px] w-px shrink-0 bg-[var(--border-strong)]" />
               )}
               {i === 3 && (
                 <span
                   aria-hidden
-                  className="hidden h-[15px] w-px shrink-0 bg-[var(--border-strong)] @min-[900px]:block"
+                  className="hidden h-[16px] w-px shrink-0 bg-[var(--border-strong)] @min-[1040px]:block"
                 />
               )}
               <Cluster
