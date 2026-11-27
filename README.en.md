@@ -18,11 +18,6 @@
 
 Computes breadth, equal- and cap-weighted returns, concentration, sector participation and dispersion from Tushare daily data. Includes eight main screens plus briefing and chart-lab routes, a Flask API and a single-file offline export.
 
-> **v0.4.3** fixes the P0/P1 data-integrity findings from the audit: historical partial-session backfill,
-> margin aggregation scope, missing-value semantics, API security headers and deterministic ordering.
-> It also adds data licence / disclaimer disclosures. See the [release notes](docs/release.md),
-> [known limitations](docs/known_limitations.md) and the [historical completion report](docs/release_completion_report.md).
-
 ## Features
 
 - Six view families: breadth, concentration, sectors, stocks, sentiment and holdings
