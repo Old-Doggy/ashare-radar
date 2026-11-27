@@ -58,7 +58,7 @@ python -m pipeline.bootstrap                          # B. from a local parquet 
 python -m pipeline.build_marts
 ```
 
-- `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes ~10 minutes; a longer history (e.g. `20161201`) takes ~1–2 hours because of Tushare rate limits.
+- `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes a few minutes; a longer history (e.g. `20160101`, ~2,650 sessions) takes about **35–45 minutes** (3 concurrent fetch workers by default + a 450 req/min cap; tune with `--workers`). Re-running the same command resumes from checkpoints after an interruption.
 - `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
 - Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
 - Requests are paced automatically: at 5000 points the normal cap is 500/min, but `limit_list_d` is limited to 200/min and 10,000 calls/day and `stock_basic` to 50/min. This project keeps 20–40% headroom, retries rate-limit errors with exponential backoff, tries a permission-denied endpoint only once, and **resumes from checkpoints if you re-run the same command after an interruption**. See [docs/rate_limits.md](docs/rate_limits.md).

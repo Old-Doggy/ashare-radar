@@ -185,7 +185,7 @@ def test_api_bootstrap_required_failure_or_optional_provenance(mutable_lake, syn
     monkeypatch.setattr(bootstrap, "_load_meta", lambda *a: 0)
     monkeypatch.setattr(bootstrap, "_load_calendar", lambda *a: [target])
     monkeypatch.setattr(bootstrap, "DATASETS", ["daily", "moneyflow"])
-    monkeypatch.setattr(bootstrap, "update_indices", lambda *a: None)
+    monkeypatch.setattr(bootstrap, "_prefetch_indices", lambda *a, **k: 0)
     monkeypatch.setattr(bootstrap, "run_gates", lambda *a, **k: {
         "date": target, "passed": True, "blocking": [], "gates": []})
     monkeypatch.setattr(bootstrap.time, "sleep", lambda *a: None)

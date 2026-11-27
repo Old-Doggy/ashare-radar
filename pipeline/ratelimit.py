@@ -9,8 +9,8 @@
 - daily / daily_basic / adj_factor / stk_limit / moneyflow / margin / index_daily /
   trade_cal：按积分表，5000 积分即 500 次/分钟。
 
-这里的默认值在官方上限上留 20%–40% 余量（400 次/分钟、limit_list_d 160 次/分钟、
-stock_basic 40 次/分钟、limit_list_d 每天 9000 次），并保证任意两次请求间隔 ≥0.15s，
+这里的默认值在官方上限上留约 10% 余量（450 次/分钟、limit_list_d 160 次/分钟、
+stock_basic 40 次/分钟、limit_list_d 每天 9000 次），并保证任意两次请求间隔 ≥0.12s，
 避免“瞬时突发”触发风控。所有阈值都可用环境变量覆盖，见 docs/rate_limits.md。
 """
 from __future__ import annotations
@@ -24,8 +24,8 @@ import time
 from collections import defaultdict, deque
 
 # ---------------------------------------------------------------- 默认限值
-DEFAULT_GLOBAL_PER_MIN = 400        # 官方 500/min，留 20% 余量
-DEFAULT_MIN_INTERVAL = 0.15         # 任意两次请求最小间隔（≈6.7 次/秒）
+DEFAULT_GLOBAL_PER_MIN = 450        # 官方 500/min，留 10% 余量
+DEFAULT_MIN_INTERVAL = 0.12         # 任意两次请求最小间隔（≈8.3 次/秒）
 DEFAULT_PER_API_PER_MIN = {
     "limit_list_d": 160,            # 官方 200/min（且 1 万次/天）
     "stock_basic": 40,              # 官方 50/min
@@ -42,7 +42,8 @@ RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 PERMISSION_RE = re.compile(
-    r"(没有权限|权限不足|无权限|没有访问该接口的权限|积分不足|权限不够|not\s*permission)",
+    r"(没有权限|没有.*访问权限|权限不足|无权限|访问该接口的权限|积分不足|权限不够|"
+    r"权限的具体详情|not\s*permission)",
     re.IGNORECASE,
 )
 TRANSIENT_RE = re.compile(

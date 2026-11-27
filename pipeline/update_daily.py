@@ -156,7 +156,13 @@ def fetch(pro, ds: str, day: str) -> pd.DataFrame:
     raise ValueError(ds)
 
 
-def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) -> int:
+def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str,
+           *, replace: bool = False) -> int:
+    """写入一天的一个数据集。
+
+    replace=True 表示调用方已删除该日旧行（批量建库快速路径）：跳过逐行 UPDATE /
+    NOT EXISTS 检查，直接追加/更新，避免在千万行表上做昂贵的反连接。
+    """
     if df is None or df.empty:
         return 0
     df = df.copy()
@@ -167,20 +173,35 @@ def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) 
     key = ["exchange_id", "trade_date"] if ds == "margin" else ["ts_code", "trade_date"]
     if df.duplicated(key).any():
         raise ValueError(f"duplicate keys in {ds} response")
+    # DuckDB 2.0：fetchone() 可能留下未完成的 result，随后 register() 会报
+    # ResourceInUseException（批量建库连续写入时必现）。先跑一条完整 SELECT 清空挂起结果。
+    try:
+        con.execute("SELECT 1").fetchall()
+    except Exception:
+        pass
     con.register("tmp_df", df)
     if ds == "daily":
-        con.execute("""UPDATE core_stock_day SET open=t.open, high=t.high, low=t.low,
-            close=t.close, pre_close=t.pre_close, pct_chg=t.pct_chg, vol=t.vol, amount=t.amount,
-            adj_close=t.close * core_stock_day.adj_factor
-            FROM tmp_df t WHERE core_stock_day.ts_code=t.ts_code AND core_stock_day.trade_date=t.trade_date""")
-        con.execute(
-            """
-            INSERT INTO core_stock_day (ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount)
-            SELECT ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount
-            FROM tmp_df t
-            WHERE NOT EXISTS (SELECT 1 FROM core_stock_day c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
-            """
-        )
+        if replace:
+            con.execute(
+                """
+                INSERT INTO core_stock_day (ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount)
+                SELECT ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount
+                FROM tmp_df
+                """
+            )
+        else:
+            con.execute("""UPDATE core_stock_day SET open=t.open, high=t.high, low=t.low,
+                close=t.close, pre_close=t.pre_close, pct_chg=t.pct_chg, vol=t.vol, amount=t.amount,
+                adj_close=t.close * core_stock_day.adj_factor
+                FROM tmp_df t WHERE core_stock_day.ts_code=t.ts_code AND core_stock_day.trade_date=t.trade_date""")
+            con.execute(
+                """
+                INSERT INTO core_stock_day (ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount)
+                SELECT ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount
+                FROM tmp_df t
+                WHERE NOT EXISTS (SELECT 1 FROM core_stock_day c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
+                """
+            )
     elif ds == "adj_factor":
         con.execute(
             """
@@ -207,7 +228,8 @@ def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) 
             """
         )
     elif ds == "limit_list_d":
-        con.execute("DELETE FROM core_limit_event WHERE (ts_code, trade_date) IN (SELECT ts_code, trade_date FROM tmp_df)")
+        if not replace:
+            con.execute("DELETE FROM core_limit_event WHERE (ts_code, trade_date) IN (SELECT ts_code, trade_date FROM tmp_df)")
         con.execute(
             """
             INSERT INTO core_limit_event
@@ -217,11 +239,12 @@ def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) 
                    CASE WHEN "limit"='D' THEN 1 ELSE 0 END,
                    CASE WHEN "limit"='Z' THEN 1 ELSE 0 END
             FROM tmp_df t
-            WHERE NOT EXISTS (SELECT 1 FROM core_limit_event c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
-            """
+            WHERE ? OR NOT EXISTS (SELECT 1 FROM core_limit_event c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
+            """, [replace],
         )
     elif ds == "moneyflow":
-        con.execute("DELETE FROM core_flow_day WHERE (ts_code, trade_date) IN (SELECT ts_code, trade_date FROM tmp_df)")
+        if not replace:
+            con.execute("DELETE FROM core_flow_day WHERE (ts_code, trade_date) IN (SELECT ts_code, trade_date FROM tmp_df)")
         con.execute(
             """
             INSERT INTO core_flow_day
@@ -229,21 +252,22 @@ def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) 
                    (buy_lg_amount + buy_elg_amount - sell_lg_amount - sell_elg_amount),
                    (buy_lg_amount + buy_elg_amount + buy_md_amount + buy_sm_amount)
             FROM tmp_df t
-            WHERE NOT EXISTS (SELECT 1 FROM core_flow_day c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
-            """
+            WHERE ? OR NOT EXISTS (SELECT 1 FROM core_flow_day c WHERE c.ts_code=t.ts_code AND c.trade_date=t.trade_date)
+            """, [replace],
         )
     elif ds == "margin":
-        con.execute("DELETE FROM core_margin_day WHERE (exchange_id, trade_date) IN (SELECT exchange_id, trade_date FROM tmp_df)")
+        if not replace:
+            con.execute("DELETE FROM core_margin_day WHERE (exchange_id, trade_date) IN (SELECT exchange_id, trade_date FROM tmp_df)")
         con.execute(
             """
             INSERT INTO core_margin_day
             SELECT trade_date, exchange_id, rzye, rzmre, rzche, rqye, rzrqye
             FROM tmp_df t
-            WHERE NOT EXISTS (
+            WHERE ? OR NOT EXISTS (
                 SELECT 1 FROM core_margin_day c
                 WHERE c.trade_date = t.trade_date AND c.exchange_id = t.exchange_id
             )
-            """
+            """, [replace],
         )
     con.unregister("tmp_df")
     return len(df)
@@ -260,10 +284,16 @@ def _checkpoint_schema(con):
 
 
 def _checkpoint(con, day, ds, src):
-    con.execute("""INSERT INTO core_dataset_checkpoint VALUES (?::DATE, ?, ?, TRUE, current_timestamp)
+    cur = con.execute("""INSERT INTO core_dataset_checkpoint VALUES (?::DATE, ?, ?, TRUE, current_timestamp)
         ON CONFLICT(trade_date,dataset) DO UPDATE SET source=excluded.source,
         completed=TRUE, updated_at=excluded.updated_at""",
         [datetime.strptime(day, "%Y%m%d").date(), ds, src])
+    # DuckDB 的 INSERT/UPDATE/DELETE 会返回行数结果；不消费会在下一次 register()
+    # 时抛 "unfinished result"（批量建库顺序写入时必须显式取完）。
+    try:
+        cur.fetchall()
+    except Exception:
+        pass
 
 
 def _peek_open_days(pro, con, end: str) -> list[str]:

@@ -36,6 +36,10 @@ HISTORICAL_NOT_APPLICABLE = {
 }
 # 历史修复作用域跳过的重型/发布专用门禁（批次结束后统一跑 gate15）。
 HISTORICAL_SKIPPED = (15, 16, 17, 18)
+# 历史日期的上游字段覆盖本身达不到发布阈值：2016 年 Tushare daily_basic 只有约 98.2%
+# （部分老股无市值行）。history scope 以 95% 作为阻断下限——低于它说明本次拉取真的异常；
+# 发布日（publish scope）仍要求 99%。阈值数值本身不放宽，只是区分历史/发布两个作用域。
+HISTORY_MIN_COVERAGE = 0.95
 # gate15 用「局部中位数 >= 该值」确认这是一个真实的完整市场日，避免合成小库误判。
 HISTORY_MIN_TYPICAL_ROWS = 2000
 HISTORY_RATIO = 0.85
@@ -172,18 +176,126 @@ def _fd_scale(con, day):
                         if total else "no official limit events for this date")}
 
 
+SSE_SZSE = "(ts_code LIKE '%.SH' OR ts_code LIKE '%.SZ')"
+
+
+def _history_gates(con: duckdb.DuckDBPyConnection, day: str, prev_day: str | None) -> dict:
+    """历史建库日的轻量校验：只阻断“数据不完整/不合法”，比发布门禁快一个数量级。
+
+    历史日期只阻断：行数连续性、主键唯一、OHLC 结构异常、收益一致性、字段覆盖
+    （95% 历史下限）、成交额有效性、限价覆盖（95% 历史下限）、指数完整/一致性。
+    跳过仅对发布日有意义的门禁：6/9（连续性 warn）、7/14（行业与上市日期元数据，
+    静态映射非 PIT）、15–18（发布链专用）。阈值本身不放宽，只是区分作用域。
+    gate3 对 |pct_chg|>44 只记录不阻断（退市整理/复牌等真实事件，W11-10）。
+    """
+    d = datetime.strptime(day, "%Y%m%d").date()
+    previous = datetime.strptime(prev_day, "%Y%m%d").date() if prev_day else None
+    gates = []
+
+    def add(gid, name, ok, value, threshold, level, message=""):
+        gates.append({"id": gid, "name": name, "pass": bool(ok) if ok is not None else None,
+                      "value": value, "threshold": threshold, "level": level,
+                      "message": message})
+
+    counts = _daily_counts(con, d)
+    n = counts[-1][1] if counts and counts[-1][0] == d else 0
+    n_prev = _scalar(con, "SELECT count(*) FROM core_stock_day WHERE trade_date=?", [previous]) if previous else None
+    ratio = n / n_prev if n_prev else None
+    median20, n_prior = _prior_median(counts)
+    median_ratio = n / median20 if median20 else None
+    count_ok = (n > 0 and (ratio is None or 0.95 <= ratio <= 1.05)
+                and (median_ratio is None or median_ratio >= 0.95))
+    add(1, "row count", count_ok, n,
+        "history scope: >0; previous-day ratio 0.95..1.05; >=0.95 x prior-20d median",
+        "block", f"previous={n_prev}, ratio={ratio}, prior20_median={median20}, median_ratio={median_ratio}")
+
+    dup = _scalar(con, """SELECT count(*) FROM (
+        SELECT ts_code FROM core_stock_day WHERE trade_date=? GROUP BY ts_code HAVING count(*)>1)""", [d]) or 0
+    add(2, "primary key unique", dup == 0, dup, "0 duplicate keys", "block")
+
+    bad, extreme = con.execute(
+        f"""SELECT count(*) FILTER (WHERE close IS NULL OR NOT isfinite(close) OR close<=0
+              OR high IS NULL OR low IS NULL OR NOT isfinite(high) OR NOT isfinite(low)
+              OR low<=0 OR high<low OR close<low-0.011 OR close>high+0.011),
+              count(*) FILTER (WHERE abs(pct_chg) > 44)
+           FROM core_stock_day WHERE trade_date=? AND {SSE_SZSE}""", [d]).fetchone()
+    add(3, "price structure", bad == 0, bad,
+        "finite positive OHLC; low<=close<=high (SSE/SZSE); |pct_chg|>44 recorded only",
+        "block", f"structural_bad={bad}, extreme_pct_chg_rows={extreme} (真实事件，不阻断)")
+
+    comparable, conflict = con.execute(
+        f"""SELECT count(*), count(*) FILTER (WHERE abs(pct_chg-(close/pre_close-1)*100)>0.1)
+            FROM core_stock_day WHERE trade_date=? AND pre_close>0 AND isfinite(pre_close)
+              AND close>0 AND isfinite(close) AND pct_chg IS NOT NULL AND isfinite(pct_chg)
+              AND {SSE_SZSE}""", [d]).fetchone()
+    share = conflict / comparable if comparable else 1.0
+    add(4, "return consistency", share < 0.01, share, "<1% of comparable rows", "block",
+        f"{conflict}/{comparable} comparable rows")
+
+    cov = _scalar(con, f"""SELECT count(*) FILTER (
+        WHERE adj_factor>0 AND isfinite(adj_factor) AND circ_mv>0 AND isfinite(circ_mv)
+        AND adj_close>0 AND isfinite(adj_close))::DOUBLE/nullif(count(*),0)
+        FROM core_stock_day WHERE trade_date=? AND {SSE_SZSE}""", [d]) or 0
+    add(5, "positive field coverage", cov >= HISTORY_MIN_COVERAGE, cov,
+        f">={HISTORY_MIN_COVERAGE} (history floor; publish requires "
+        f"{settings.GATE_MIN_COVERAGE:.0%})", "block", f"historical upstream coverage {cov:.2%}")
+
+    for gid, name in ((6, "breadth continuity"), (7, "industry coverage"),
+                      (9, "EW continuity"), (14, "listing dates available")):
+        add(gid, name, None, None, "skipped in history scope", "info",
+            "发布日专属检查（历史建库不适用；阈值未放宽）")
+
+    bad_adj = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND (adj_factor IS NULL OR NOT isfinite(adj_factor) OR adj_factor<=0)""", [d]) or 0
+    add(8, "adj factor valid", bad_adj == 0, bad_adj, "0 invalid factors", "warn")
+
+    bad_amount = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND (amount IS NULL OR NOT isfinite(amount) OR amount<0 OR vol IS NULL
+             OR NOT isfinite(vol) OR vol<0)""", [d]) or 0
+    add(10, "amount and volume", bad_amount == 0, bad_amount,
+        "finite nonnegative; amount in thousand CNY", "block")
+
+    limit_cov = _scalar(con, f"""SELECT count(*) FILTER (
+        WHERE up_limit>0 AND isfinite(up_limit) AND down_limit>0 AND isfinite(down_limit)
+        AND up_limit>=down_limit)::DOUBLE/nullif(count(*),0)
+        FROM core_stock_day WHERE trade_date=? AND {SSE_SZSE}""", [d])
+    add(11, "limit-price coverage", limit_cov is not None and limit_cov >= HISTORY_MIN_COVERAGE,
+        limit_cov, f">={HISTORY_MIN_COVERAGE} (history floor)", "block")
+
+    n_indices = _scalar(con, """SELECT count(DISTINCT ts_code) FROM core_index_day WHERE trade_date=?
+        AND ts_code IN ('000300.SH','000905.SH','000852.SH','000001.SH')
+        AND pct_chg IS NOT NULL AND isfinite(pct_chg) AND close>0""", [d]) or 0
+    add(12, "index completeness", n_indices == 4, n_indices, "4 benchmark indices", "warn")
+
+    bad_indices = _scalar(con, """SELECT count(*) FROM core_index_day WHERE trade_date=?
+        AND pre_close>0 AND pct_chg IS NOT NULL
+        AND abs(pct_chg-(close/pre_close-1)*100)>0.1""", [d]) or 0
+    add(13, "index return consistency", bad_indices == 0, bad_indices, "0 conflicts >0.1pp", "block")
+
+    skipped = [6, 7, 9, 14, 15, 16, 17, 18]
+    blocking = [g["id"] for g in gates if g["pass"] is False and g["level"] == "block"]
+    return {"date": day, "scope": "history",
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "rows": n, "gates": gates, "passed": not blocking, "blocking": blocking,
+            "not_applicable": [7, 14], "skipped": skipped}
+
+
 def run_gates(con: duckdb.DuckDBPyConnection, day: str, prev_day: str | None = None,
               *, persist: bool = True, scope: str = "publish") -> dict:
     """Validate a YYYYMMDD day. persist=False supports a caller-owned transaction.
 
     scope="publish" (default) runs the full gate set.
-    scope="history" is used by the historical repair flow: metadata gates 7/14 are
-    recorded as not-applicable and heavy gates 15-18 are skipped (batch-checked later).
+    scope="history" uses the lightweight historical build checks (see _history_gates).
     """
     d = datetime.strptime(day, "%Y%m%d").date()
     previous = datetime.strptime(prev_day, "%Y%m%d").date() if prev_day else None
     gates = []
-    skipped = list(HISTORICAL_SKIPPED) if scope == "history" else []
+    if scope == "history":
+        out = _history_gates(con, day, prev_day)
+        if persist:
+            persist_report(out)
+        return out
+    skipped = []
 
     def add(gid, name, ok, value, threshold, level, message=""):
         gates.append({"id": gid, "name": name, "pass": bool(ok) if ok is not None else None,
@@ -268,8 +380,15 @@ def run_gates(con: duckdb.DuckDBPyConnection, day: str, prev_day: str | None = N
         WHERE adj_factor>0 AND isfinite(adj_factor) AND circ_mv>0 AND isfinite(circ_mv)
         AND adj_close>0 AND isfinite(adj_close))::DOUBLE/nullif(count(*),0)
         FROM core_stock_day WHERE trade_date=?""", [d]) or 0
-    add(5, "positive field coverage", cov >= settings.GATE_MIN_COVERAGE, cov,
-        f">={settings.GATE_MIN_COVERAGE}", "block")
+    # 历史作用域用 95% 阻断下限（2016 年上游 daily_basic 覆盖本身约 98.2%）；发布日仍 99%。
+    coverage_floor = HISTORY_MIN_COVERAGE if scope == "history" else settings.GATE_MIN_COVERAGE
+    coverage_message = ""
+    if scope == "history" and settings.GATE_MIN_COVERAGE > cov >= HISTORY_MIN_COVERAGE:
+        coverage_message = (f"historical upstream coverage {cov:.2%} is below the publish threshold "
+                            f"{settings.GATE_MIN_COVERAGE:.0%}; history floor is {HISTORY_MIN_COVERAGE:.0%}")
+    add(5, "positive field coverage", cov >= coverage_floor, cov,
+        f">={coverage_floor}" + (" (history scope; publish requires 99%)" if scope == "history" else ""),
+        "block", coverage_message)
 
     def stats(dt):
         return con.execute(SAMPLE_SQL + """SELECT

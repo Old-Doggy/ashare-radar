@@ -225,7 +225,7 @@ def test_gate15_blocks_real_market_partial_day(tmp_path):
     assert result["pass"] is True and result["value"]["insufficient_history"] is True
 
 
-def test_history_scope_records_metadata_gates_as_not_applicable(mutable_lake, synthetic_lake):
+def test_history_scope_records_metadata_gates_as_skipped(mutable_lake, synthetic_lake):
     with duckdb.connect(str(mutable_lake)) as con:
         con.execute("UPDATE core_stock_meta SET industry=NULL WHERE ts_code='600001.SH'")
         con.execute("DELETE FROM core_stock_meta WHERE ts_code='300001.SZ'")
@@ -238,11 +238,12 @@ def test_history_scope_records_metadata_gates_as_not_applicable(mutable_lake, sy
     assert 7 in publish["blocking"] and 14 in publish["blocking"]
     hist_gate7 = gate(history, 7)
     hist_gate14 = gate(history, 14)
-    assert hist_gate7["not_applicable_historical"] is True
-    assert hist_gate7["pass"] is None and hist_gate7["recorded_pass"] is False
-    assert hist_gate14["not_applicable_historical"] is True
+    # 历史轻量门禁把发布日专属项记录为 info/skipped（阈值未放宽，只是不在历史日执行）
+    assert hist_gate7["pass"] is None and hist_gate7["level"] == "info"
+    assert hist_gate14["pass"] is None and hist_gate14["level"] == "info"
     assert 7 not in history["blocking"] and 14 not in history["blocking"]
     assert history["not_applicable"] == [7, 14]
+    assert {6, 7, 9, 14, 15, 16, 17, 18} <= set(history["skipped"])
 
 
 def test_history_scope_still_blocks_data_quality_gate(mutable_lake, synthetic_lake):
