@@ -1,4 +1,7 @@
 {
+  "_as_of": "2026-11-12",
+  "_source": "隔离副本最近 20 日实际更新摘要",
+  "_note": "历史快照；141.5s / 32 warnings 为当时值，不代表当前发布耗时。",
   "status": "ok",
   "updated_days": 20,
   "warning_count": 32,

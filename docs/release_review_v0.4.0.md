@@ -1,5 +1,10 @@
 # A股雷达 v0.4.0 发布终审
 
+> **历史文档（2026-11-26，v0.4.0 终审），已被 v0.4.3（2026-11-27）取代。**
+> 文中测试数（pytest 139 / 前端 node **49**）是 v0.4.0 基线：v0.4.1/v0.4.2 后 node 测试已 52，
+> v0.4.3 集成后为 117；产物体积/行数也为历史值。
+> 现行事实见 [known_limitations.md](known_limitations.md) 与 README 验证状态；v0.4.3 修复见 [release.md](release.md)。
+
 2026-11-26，上海时间。基线为 `bec21f8`，即 GitHub 现有 `v0.3.0`。行情截至 2026-11-25。收尾审计在默认库上以只读连接执行，篡改回归和重建在副本上执行，全程关闭 `.env` 加载。
 
 ## 结论
@@ -103,6 +108,6 @@ ashare-radar.html: 62485758 bytes | 2026-11-26 09:25:27 +08:00
 
 ## 发布后必须做的操作
 
-1. 确认推送分支的 GitHub Actions 通过，再创建 `v0.4.0` tag 和 Release。
+1. 确认推送分支的 GitHub Actions 通过，再创建 `v0.4.0` tag 和 Release。（历史：v0.4.0 已发布；当前发布请创建 `v0.4.3` tag，步骤见 [release.md](release.md)）
 2. 部署机更新依赖并构建前端，运行 `python -m pipeline.release --rebuild` 后重启服务。
 3. 检查滚动 API、行业轮动页和新离线包，确认下一次计划任务完成。详细顺序见 [发布说明](release.md)。

@@ -1,0 +1,46 @@
+# NOTICE — 数据来源、许可与免责声明
+
+本文件补充 [LICENSE](LICENSE)（MIT）。**MIT 许可只覆盖本仓库中的软件源代码**，不覆盖仓库内展示的第三方数据、截图或任何行情数据的使用权。
+
+## 1. 数据来源与再分发限制
+
+- 本项目运行所需的行情数据来自 **Tushare Pro**（https://tushare.pro）。使用者必须自行持有有效的 Tushare Pro 账号、积分与相应接口权限，并遵守 Tushare 的服务条款与数据使用规定。**本项目不再分发任何原始行情数据**：`data/`（DuckDB、parquet 快照、简报、导出 payload）、`.env`、`frontend/dist/` 均不随仓库分发（见 `.gitignore` 与 `docs/release.md` §6）。
+- 备用源为 **akshare**（聚合东方财富等公开网页数据，https://akshare.akfamily.xyz），同样受其上游数据提供方条款约束。
+- 复现本项目需要使用者用自己的凭据重新抓取数据；仓库、Issue 与发布包中不提供 `lake.duckdb`、`static-data.json`、单文件 HTML 等包含行情内容的产物。
+- 若你基于本项目二次分发任何包含 Tushare/akshare 数据的产物（截图、导出 HTML、衍生数据），**必须自行取得数据提供方的授权并自行承担合规责任**；MIT 许可不构成此类授权。
+
+## 2. 截图与演示内容
+
+`docs/screenshots/*.png` 与 README 内嵌图片是**项目功能演示**，其中包含由 Tushare 数据计算的、截至截图当日的历史行情数字（如广度、涨跌停家数、个股收益）。这些截图：
+
+- 仅用于说明界面与图表形态，**不构成任何投资建议、推荐或收益承诺**；
+- 数字为历史快照，可能与当前数据、交易所口径或第三方数据不一致（见 [docs/known_limitations.md](docs/known_limitations.md)）；
+- 不含任何真实个人持仓；示例持仓为虚构数据。
+
+## 3. 第三方软件与字体许可
+
+本项目依赖的第三方组件保留其各自许可：
+
+| 组件 | 许可 |
+|---|---|
+| DuckDB | MIT |
+| Flask | BSD-3-Clause |
+| React / React DOM | MIT |
+| ECharts | Apache-2.0 |
+| Tailwind CSS / Vite / TypeScript | MIT / MIT / Apache-2.0 |
+| lucide-react | ISC |
+| i18next / react-i18next / zustand / @tanstack/react-query | MIT |
+| Inter、JetBrains Mono、Noto Sans SC、Noto Serif SC（@fontsource） | SIL Open Font License 1.1 |
+
+导出的单文件 HTML 会按需内联上述字体子集与图标，仅用于该产物的本地离线展示；字体的 OFL 许可允许内嵌与再分发，但要求保留字体名称与许可声明（本文件即为此声明）。
+
+## 4. 免责声明
+
+- 本项目是**本地数据分析与可视化工具，不是投资顾问**。任何页面、简报、图表、洞察文档中的数字与文字均**不构成投资建议**，也不构成对任何证券的买卖推荐。
+- 数据可能存在缺失、延迟、口径变化或上游错误（已知问题逐条列于 [docs/known_limitations.md](docs/known_limitations.md)）。本项目按 MIT 许可「as is」提供，**不对数据准确性、完整性、及时性作任何明示或暗示担保**。
+- 使用者依据本项目输出做出的任何决策及其后果，由使用者自行承担。
+- 「A股」「沪深300」等名称仅用于描述数据口径，相关商标归其权利人所有。
+
+## 5. 版本
+
+本 NOTICE 随 v0.4.3 发布更新。数据口径与限制的权威说明见 [docs/metric_contracts.md](docs/metric_contracts.md) 与 [docs/known_limitations.md](docs/known_limitations.md)。

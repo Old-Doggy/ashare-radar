@@ -9,6 +9,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/node-22.18%2B-339933?logo=node.js&logoColor=white" alt="Node">
+  <img src="https://img.shields.io/badge/version-v0.4.3-2f6f4e" alt="Version">
 </p>
 
 <p align="center">
@@ -17,13 +18,44 @@
 
 Computes breadth, equal- and cap-weighted returns, concentration, sector participation and dispersion from Tushare daily data. Includes eight main screens plus briefing and chart-lab routes, a Flask API and a single-file offline export.
 
+> **v0.4.3** fixes the P0/P1 data-integrity findings from the audit: historical partial-session backfill,
+> margin aggregation scope, missing-value semantics, API security headers and deterministic ordering.
+> It also adds data licence / disclaimer disclosures. See the [release notes](docs/release.md),
+> [known limitations](docs/known_limitations.md) and the [historical completion report](docs/release_completion_report.md).
+
 ## Features
 
 - Six view families: breadth, concentration, sectors, stocks, sentiment and holdings
 - The Rotation view plays the sector strength cloud using each sector's last 5, 10 or 20 daily observations for cumulative equal-weight returns and average breadth
-- Daily updates with fourteen quality gates; current-day post-close akshare fallback
+- Daily updates with 18 quality gates (14 in v0.4.2; v0.4.3 adds gates 15–18: full-history integrity, limit-band stability, sealed-amount scale and row-count trend, and fixes gates 1/3/6); current-day post-close akshare fallback
+- Missing data stays unknown: rows failing coverage rules do not enter weight-based metrics and the UI shows `—`/gaps instead of 0
 - Chinese/English UI, dark/light themes, colorblind palette, URL state, PNG/CSV export
 - Single-file HTML build for offline use
+
+## Known limitations (quantified)
+
+Full list of 15 items: [docs/known_limitations.md](docs/known_limitations.md) (Chinese). The essentials:
+
+- **Historical partial sessions**: the v0.4.2 delivery database has **192** partial sessions
+  (2016-12-08..2022-11-16; 151 after 2018; 88 with <1000 core rows). **v0.4.3 backfilled all 192**
+  (failed=0, `remaining_partial=[]`, min daily rows 189→2,768), added **gate 15** to block regressions and
+  took over production through a controlled promotion. Historical sector coverage after repair is still
+  93–97% because the mapping is static, not point-in-time.
+- **ST 5% band break (upstream)**: since 2026-07-06 Tushare `stk_limit` returns a 10% band for stocks still
+  named ST, so `limit_up_5pct_n` has been 0 for 98 consecutive sessions. Verified upstream (148/148 match
+  local data), not fabricated locally; gate 16 warned on 2026-07-06 (148/5,515 = 2.68% band switches).
+- **Margin**: published T+1 (latest day empty); SZSE is missing upstream on 2026-05-11/18/21. From v0.4.3 a day
+  missing an exchange outputs NULL instead of a partial sum (`margin_n_exchanges`: 2,421 days=2 / 3 days=1 / latest=0).
+- **Official limit list**: `limit_list_d` permission is unavailable; broken-board rate / sealed amount only cover
+  2019-11-28..2026-05-22 (1,569 sessions) and show `—` otherwise. Limit-up counts use price-based limits.
+- **Sector mapping**: static bridge; 241 stocks / 328,485 rows unmapped (3.13% of history; 0 on the latest day),
+  so historical sector aggregates carry look-ahead bias.
+- **Others**: `fd_amount` unit anomaly on 95 sessions (2019-11-28..2020-04-20, now NULL); three historical codes
+  without listing dates (2,720 rows permanently excluded); northbound flow definition broke on 2024-08-19;
+  source reconciliation with `n=0` is *not* a pass; offline builds are snapshots and cannot receive later alerts.
+- **Performance**: the single-file build is 63,231,201 B (about 63.2 MB) with FCP 912 ms / load 852 ms / LCP 1,060 ms;
+  see [docs/performance.md](docs/performance.md) for the 2026-11-27 re-measurement (the old
+  "all endpoints p95<150 ms" claim no longer holds; `/api/stocks` p95 591–614 ms).
 
 ## Quick start
 
@@ -31,7 +63,7 @@ Requirements: Python 3.12, Node 22.18+, a Tushare Pro token (additional endpoint
 
 ### One-click start (Windows)
 
-Double-click `start.bat`: it picks a Python with duckdb/tushare, starts the server and opens http://127.0.0.1:8000. If it is already running, it just opens the page. Double-click `stop.bat` to stop it. A missing frontend build is created with `npm install && npm run build`.
+Double-click `start.bat`: it picks a Python with duckdb/tushare, starts the server and opens http://127.0.0.1:8000. If it is already running, it just opens the page. Double-click `stop.bat` to stop it. A missing frontend build is created with `npm install && npm run build`; if only the offline single-file build exists, the script explicitly warns that it is a non-realtime snapshot.
 
 ```bash
 git clone https://github.com/Old-Doggy/ashare-radar.git
@@ -67,9 +99,41 @@ python -m pipeline.export_static
 ```
 
 Use `python -m pipeline.release` for daily publication, or add `--rebuild` to rebuild only.
-When upgrading from v0.3.0, build the new frontend first and run `python -m pipeline.release --rebuild` to create the rolling table and refresh the offline file. See the [release instructions](docs/release.md).
+When upgrading from v0.3.0, build the new frontend first and run `python -m pipeline.release --rebuild` to create the rolling table and refresh the offline file.
 Failed publication preserves the previous HTML. Existing offline copies cannot receive later alerts.
-Frontend and backend fixes and historical repairs were validated against an isolated database copy. Original data and release artifacts were preserved. See the [completion report](docs/release_completion_report.md) for evidence and remaining source limitations.
+See the [release instructions](docs/release.md).
+
+## Data & licence
+
+- **Software licence**: code is released under [MIT](LICENSE).
+- **Data licence**: market data comes from **Tushare Pro**. You must hold your own account, points and endpoint
+  permissions and comply with Tushare's terms. This project **does not redistribute raw market data**
+  (`data/`, `frontend/dist/` and `.env` are git-ignored). Screenshots are demos only; the offline HTML is
+  generated locally from your own data. See [NOTICE](NOTICE).
+- **Disclaimer**: this is a local analytics tool, **not investment advice**. Data may be missing, delayed or
+  inconsistent with exchanges/upstream sources and is provided "as is" under MIT without warranty.
+  Known issues: [docs/known_limitations.md](docs/known_limitations.md).
+- Third-party components (DuckDB/Flask/React/ECharts/Tailwind/Vite/lucide, ...) keep their own licences; inlined
+  fonts (Inter, JetBrains Mono, Noto Sans/Serif SC) are SIL OFL 1.1 as declared in [NOTICE](NOTICE).
+
+## Validation status
+
+| Item | Status (2026-11-27, after v0.4.3 integration) |
+|---|---|
+| Tests | pytest **236 passed / 0 failed / 0 skipped**; frontend `node --test` **117 passed / 0 fail** |
+| Static checks | `ruff check` clean; `tsc --noEmit` 0 errors |
+| Quality gates | **18**; 2026-11-26 `quality/latest` 18/18 pass, `blocking=[]` |
+| History integrity | **192/192** partial sessions backfilled (failed=0, `remaining_partial=[]`); gate 15 passes (`incomplete_dates`=0, min daily rows 2,768) |
+| Core data size | `core_stock_day` = **10,827,571** rows; `feat_stock` = 10,478,223; `mart_market_day` = 2,425 sessions (2016-12-01..2026-11-26) |
+| Static audit | `scripts/audit_all.py --offline`: **60 passed / 0 failed / 3 skipped** (verdict=`pass_with_skips`; skips are not passes) |
+| Artifacts | single-file HTML **63,231,201 B** (about 63.2 MB); static payload **17,624,011 B** (about 17.6 MB) |
+| Payload meta | `meta.version=0.4.3`; `meta.source=tushare`; `unavailable_datasets=["limit_list_d","margin"]`; `meta.data_quality.n_partial_days=0`, `repaired_days=192` |
+| Known limitations | 15 items quantified: [docs/known_limitations.md](docs/known_limitations.md) |
+
+Integration evidence: [docs/validation/v0.4.3-final.json](docs/validation/v0.4.3-final.json).
+Historical acceptance/fix reports (**historical documents**, see banners at the top):
+[completion report](docs/release_completion_report.md), [fix report](docs/release_fix_report.md),
+[v0.4.0 final review](docs/release_review_v0.4.0.md), [historical validation summary](docs/validation/README.md).
 
 ## Docs
 
@@ -77,10 +141,15 @@ Frontend and backend fixes and historical repairs were validated against an isol
 |---|---|
 | [Technical notes](docs/technical.en.md) | Architecture, screens, quality gates, concurrency, limits, roadmap |
 | [Metric definitions](docs/metric_contracts.md) | Definition and denominator of each metric |
+| [Known limitations](docs/known_limitations.md) | 15 quantified data facts, fix status and reproduction commands |
+| [Performance](docs/performance.md) | Measurement date/env/method, first paint and API p50/p95 |
 | [Data sources](docs/data_sources.md) | Primary, fallback and degradation rules |
 | [Data setup](docs/data_setup.md) | Snapshot layout and bootstrap steps |
-| [Data audit](docs/audit_findings.md) | Correctness checks and known biases |
+| [Data audit (historical)](docs/audit_findings.md) | Correctness checks and known biases (historical) |
+| [Release notes](docs/release.md) | Versions, release checklist, tagging |
+| [Decision log](docs/decisions.md) | ADR list |
 
-## License
+## Version and licence
 
-MIT
+Current version **v0.4.3** (earlier releases in [release.md](docs/release.md)). Software under [MIT](LICENSE);
+data usage and disclaimer in [NOTICE](NOTICE).

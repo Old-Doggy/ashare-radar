@@ -1,4 +1,7 @@
 {
+  "_as_of": "2026-11-12",
+  "_source": "隔离修复副本摘要（pipeline.repair_history 运行）",
+  "_note": "checkpoint_repaired_dates=212 与「192 个部分日」口径不同（含重试/检查点），不等于唯一修复日期数；交付库当时未接管，v0.4.3 才完成接管。",
   "remaining_partial": [],
   "core_rows": 10766267,
   "checkpoint_repaired_dates": 212

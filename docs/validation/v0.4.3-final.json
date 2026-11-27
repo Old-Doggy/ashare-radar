@@ -1,0 +1,85 @@
+{
+  "_as_of": "2026-11-27",
+  "_source": "v0.4.3 集成接管后的最终验证（Lead 执行；数字来自 final_numbers.json / perf_api_final.json / browser/verify-*.json，原始证据不随仓库分发）",
+  "_note": "本文件是 v0.4.3 发布证据摘要；历史 2026-11-12 证据见同目录其它文件（各自带 _as_of）。",
+  "version": "0.4.3",
+  "data": {
+    "core_stock_day_rows": 10827571,
+    "feat_stock_rows": 10478223,
+    "mart_market_day_days": 2425,
+    "mart_market_day_range": ["2016-12-01", "2026-11-26"],
+    "repaired_partial_days": 192,
+    "remaining_partial_dates": 0,
+    "min_daily_rows": 2768,
+    "data_quality_ok_days": 2425,
+    "lake_bytes": 4264833024
+  },
+  "quality": {
+    "gate_count": 18,
+    "date": "20261126",
+    "passed": true,
+    "blocking": []
+  },
+  "tests": {
+    "pytest_passed": 236,
+    "pytest_failed": 0,
+    "pytest_skipped": 0,
+    "node_passed": 117,
+    "node_failed": 0,
+    "tsc_errors": 0,
+    "ruff": "pass"
+  },
+  "audit_all": {
+    "passed": 60,
+    "failed": 0,
+    "skipped": 3,
+    "verdict": "pass_with_skips",
+    "skips": ["个股跨源对账 --offline", "指数跨源对账 --offline", "涨跌停事件口径 当日无事件"]
+  },
+  "artifacts": {
+    "html_bytes": 63231201,
+    "static_payload_bytes": 17624011
+  },
+  "payload_meta": {
+    "version": "0.4.3",
+    "source": "tushare",
+    "unavailable_datasets": ["limit_list_d", "margin"],
+    "data_quality": {"n_partial_days": 0, "repaired_days": 192}
+  },
+  "performance": {
+    "measured_at": "2026-11-27",
+    "method": "Flask test client repeat=20（API）；无头 Edge file:// 3 次中位（前端）",
+    "frontend_median_ms": {"fcp": 912, "dcl": 807, "load": 852, "lcp": 1060},
+    "api_p95_ms": {
+      "/api/meta": 54.9,
+      "/api/market/series": 155.6,
+      "/api/market/day/2026-11-26": 305.2,
+      "/api/sectors?date=2026-11-26": 56.9,
+      "/api/sectors/series": 103.0,
+      "/api/sectors/roll": 191.9,
+      "/api/sector-ranks": 84.8,
+      "/api/rotation": 54.7,
+      "/api/limit-quality": 57.8,
+      "/api/stock/600519.SH": 239.0,
+      "/api/stocks?limit=400": 613.5,
+      "/api/stocks?limit=6000": 591.3,
+      "/api/quality": 0.6
+    }
+  },
+  "metrics_correction": {
+    "all_range_ew_cumulative_before": 0.2205,
+    "all_range_ew_cumulative_after": 0.1709,
+    "note": "审核阶段按删除 192 天估算的累计差是表列删除偏差，已废弃；以全样本 +17.09% 为准。"
+  },
+  "margin": {
+    "sse_szse_normal_days": 2421,
+    "only_one_exchange_days": ["2026-05-11", "2026-05-18", "2026-05-21"],
+    "t_plus_1_latest_day_exchanges": 0
+  },
+  "st_band": {
+    "switched_5pct_to_10pct_codes": 148,
+    "upstream_matches_local": "148/148",
+    "gate16_warn_date": "2026-07-06",
+    "gate16_message": "148/5515 limit bands changed vs 2026-07-03 (2.68%)"
+  }
+}

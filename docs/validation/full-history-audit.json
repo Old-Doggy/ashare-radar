@@ -1,4 +1,7 @@
 {
+  "_as_of": "2026-11-12",
+  "_source": "隔离修复副本全历史派生一致性检查",
+  "_note": "0 代表未检出差异，不是全历史真值证明；unknown_listing_rows=3056/codes=3 为修复副本口径（交付库为 2,720 行）。",
   "daily_key_duplicates": 0,
   "market_n": 0,
   "market_ew": 0,

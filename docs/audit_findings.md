@@ -1,10 +1,17 @@
-# 数据审计结论
+# 数据审计结论（2026-11-10/12）— 历史文档
 
-> 历史审计记录，不能作为当前发布许可。2026-11-12 终审确认原检查含自比、检查对象错位及前端遗漏；本轮修复范围和未解决问题见 [最终交付报告](release_completion_report.md)。下文“53项通过”“两处均已修复”仅保留历史上下文，不代表全站正确。
+> **历史文档：已被 v0.4.3 审核与修复取代，不能作为当前发布许可或全站正确性证明。**
+> as-of：2026-11-10（审计）/ 2026-11-12（终审）。2026-11-12 终审确认原检查含自比、检查对象错位及前端遗漏；
+> 2026-11-27 审核进一步证明 **v0.4.2 的** `scripts/audit_all.py`：市场/行业检查以同管线 `feat_stock` 为输入
+> （派生表重算而非原始表独立重算），且只审计最新交易日 + 少量全历史关系，**在含 192 个部分交易日的交付库上仍全部通过**。
+> **v0.4.3 已修正**：docstring 明确「派生表重算」、`sector_roll` 改为独立投影重算、新增全历史完整性检查
+> （gate15 同口径，历史部分日计入 FAIL），并在报告 verdict 中区分 skip 与 pass（见 `scripts/audit_all.py`）。
+> 现行数据事实见 [known_limitations.md](known_limitations.md)，修复记录见 [release.md](release.md)。
+> 下文“53 项通过”“两处均已修复”仅保留历史上下文；`docs/audit_report.md` 实际记录的是 64 项（63 通过 1 跳过）的不同版本。
 
 审计对象：`mart_market_day`、`mart_sector_day`、`mart_sector_month`、`mart_stock_latest`、静态 payload。
 方法：不信任现有 mart，从 `core_stock_day` / `feat_stock` 原始行独立重算；再用 akshare 抽样交叉验证；最后做批量一致性比对。
-脚本：`scripts/audit_all.py`；明细：`docs/audit_report.md`（53 项检查全部通过）。
+脚本：`scripts/audit_all.py`；明细：`docs/audit_report.md`（64 项检查 · 63 通过 · 1 跳过；审计员引用的「53 项」为更早版本）。
 
 ## 修复的真问题
 
@@ -47,10 +54,13 @@ Tushare `limit_list_d` **不含 ST/风险警示股**；价格口径 `close ≥ u
 
 1. **炸板率分母混用**：`Sentiment.tsx` 用 `broken / (limit_up_n + broken)`，分子来自官方（不含 ST），分母 `limit_up_n` 含 ST。2026-05-22 算得 13.2%，官方口径应为 **15.4%**。
    修复方式：改用后端已提供的 `broken_rate`，或分母改 `limit_up_list_n`。
-2. **状态象限与分类阈值不一致**：散点图以 50% 广度分象限，但 `regimeOf()` 用 60%/45% 分类（`config/universe.yaml`）。广度 45%–60% 的日子会落在“普涨”象限却被归为“结构分化”。→ 已统一为 50%，配置、前端分类和散点象限一致。
+2. **状态象限与分类阈值不一致**：散点图以 50% 广度分象限，但 `regimeOf()` 用 60%/45% 分类（当时的 `config/universe.yaml`，该文件 v0.4.3 已删除）。广度 45%–60% 的日子会落在“普涨”象限却被归为“结构分化”。→ 已统一为 50%，配置、前端分类和散点象限一致。
 
-两处均已修复：炸板率改用 `broken_rate`（官方分母），状态阈值统一为 50%。
+两处均已修复：炸板率改用 `broken_rate`（官方分母），状态阈值统一为 50%。2026-11-27 复核确认两项修复未回归
+（`Sentiment.tsx` 读后端 `broken_rate`；`regime.ts` 阈值 0.5；有前端测试覆盖）。
 
 ## 非数据问题
 
-- 单文件重新导出为 **35.4 MB**：`index.css` 重新引入 Noto Sans/Serif SC，500 多个字体子集被 base64 内联。如需控制在 ~16MB，可只保留 Inter/JetBrains Mono、中文走系统字体。
+- 单文件重新导出为 **35.4 MB**（历史口径）：`index.css` 重新引入 Noto Sans/Serif SC，500 多个字体子集被 base64 内联。
+  【更正】v0.4.3 集成后产物为 **63,231,201 B（约 63.2 MB）**（v0.4.2 为 62,507,567 B），其中约 67% 字符为字体 base64（woff+woff2 双格式），
+  优化方向见 [known_limitations.md](known_limitations.md) §11 与审核 W14-06。

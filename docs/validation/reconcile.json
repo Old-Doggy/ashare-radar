@@ -1,4 +1,7 @@
 {
+  "_as_of": "2026-11-12",
+  "_source": "独立源（akshare）对账结果",
+  "_note": "n=0 / no overlap：无可重合样本，n=0 不能算通过（见 docs/reconcile.md）。",
   "generated_at": "2026-11-12T11:07:54",
   "n": 0,
   "error": "no overlap"

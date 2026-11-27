@@ -1,6 +1,8 @@
 # A股雷达 发布前修复报告
 
-> **第一阶段历史记录，已由 [最终交付报告](release_completion_report.md) 更新。** 下文“未改前端”“未联网”“未修真实历史”及 NO-GO 是当时授权边界内的结论，不代表第二阶段交付状态。
+> **第一阶段历史记录（2026-11-12），已由 [最终交付报告](release_completion_report.md) 更新，并进一步被 v0.4.3（2026-11-27）取代。**
+> 下文“未改前端”“未联网”“未修真实历史”及 NO-GO 是当时授权边界内的结论，不代表第二阶段或 v0.4.3 交付状态。
+> 现行数据事实见 [known_limitations.md](known_limitations.md)，修复与发布记录见 [release.md](release.md)。
 
 日期：2026-11-12。分支：`codex/release-audit-fixes`。修复基线：`d3127b83500d2aacdf71dcbbf18e3b4bb07e7442`。
 
