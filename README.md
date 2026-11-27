@@ -31,9 +31,7 @@
 
 要求：Python 3.12、Node 22.18+、Tushare Pro token（基础接口需 2000 积分，其他接口权限分别确认）。
 
-### 一键启动（Windows）
-
-双击 `start.bat`：自动选择带依赖的 Python、启动服务并打开 http://127.0.0.1:8000；若服务已在运行则直接打开。停止双击 `stop.bat`。首次缺少前端构建时会自动执行 `npm install && npm run build`；若只有离线单文件，脚本会提示「离线快照，非实时」。
+### 1. 安装依赖并填写 token
 
 ```bash
 git clone https://github.com/Old-Doggy/ashare-radar.git
@@ -41,37 +39,55 @@ cd ashare-radar
 conda create -n ashare-radar python=3.12 -y
 conda activate ashare-radar
 pip install -r requirements.txt
-cp .env.example .env        # 填入 TUSHARE_TOKEN
+cp .env.example .env
 ```
 
-构建数据（二选一）：
+- `.env.example` 只是模板，**不要直接改它**；`cp` 出来的 **`.env`** 才是实际配置（已被 `.gitignore` 忽略）。
+- 编辑 **`.env`**，填写 `TUSHARE_TOKEN=你的token`。没有 token 只能查看现成的离线快照，不能拉取/更新数据。
+
+### 2. 构建数据（首次从零建库时执行）
+
+数据分两步：先拉原始行情，再算页面用的分析表。
 
 ```bash
-# A. 直接从 Tushare API 构建
-python -m pipeline.bootstrap_api --start 20240101
+# 2a. 原始行情 → data/lake.duckdb（二选一）
+python -m pipeline.bootstrap_api --start 20240101   # A. 直接调用 Tushare API
+python -m pipeline.bootstrap                          # B. 用本地 parquet 快照（目录结构见 docs/data_setup.md）
 
-# B. 使用本地 parquet 快照，结构见 docs/data_setup.md
-python -m pipeline.bootstrap
-```
-
-```bash
+# 2b. 原始行情 → 分析表（必须执行一次）
 python -m pipeline.build_marts
-python -m backend.main      # http://127.0.0.1:8000
 ```
 
-前端与单文件导出：
+- `bootstrap_api` / `bootstrap`：只写入 core 原始表（daily、daily_basic、adj_factor、stk_limit、指数、资金流、两融等）。`--start` 是起始日期：`20240101` 约 1 年、10 分钟量级；要更长历史（如 `20161201`）约 1–2 小时，受 Tushare 限频影响。
+- `build_marts`：把原始表算成 `feat_stock`、`mart_market_day`、行业/轮动/月表等分析表，**建库后必须跑一次，否则页面没有数据**。如果拿到的是别人构建好的 `data/lake.duckdb`（已含 marts），本步可跳过。
+- 两步都需要 token；`limit_list_d` 等可选接口无权限时会自动跳过并告警（对应指标显示为 `—`，不显示错误数字）。
+
+### 3. 启动看板（二选一）
+
+**方式一（Windows 推荐）：双击 `start.bat`**
+自动选择带依赖的 Python；`frontend/dist` 未构建时自动执行 `npm install && npm run build`；后台启动服务并在浏览器打开 <http://127.0.0.1:8000>；服务已在运行则直接打开。停止双击 `stop.bat`。
+它只负责“构建前端 + 启动服务”，**不会建库**：缺少 `data/lake.duckdb` 时只会提示先完成第 2 步。
+
+**方式二（手动）：**
 
 ```bash
-cd frontend && npm ci && npm run check && cd ..
-python -m pipeline.refresh_status
-python -m pipeline.export_static
-# 打开 frontend/dist/ashare-radar.html
+cd frontend && npm ci && npm run build && cd ..   # 首次需要；前端不改可跳过
+python -m backend.main                            # 前台启动服务，Ctrl+C 停止
 ```
 
-后续每日发布使用 `python -m pipeline.release`；只重建用 `python -m pipeline.release --rebuild`。
-从 v0.3.0 升级后，先构建新前端，再执行 `python -m pipeline.release --rebuild`，生成滚动表与新版离线包。
-更新任务、API 按钮和 Windows 脚本共用发布链；失败保留旧 HTML，已打开的离线包不会自动收到新告警。
-详见[发布说明](docs/release.md)。
+- `backend.main`：启动 Flask 服务，同时提供 `/api/*` 接口和已构建的前端页面，浏览器打开 <http://127.0.0.1:8000>；前端未构建时只返回 API、不显示页面。
+
+> 如果工作区已经带有 `data/lake.duckdb` 和 `frontend/dist`（例如本机开发目录），**直接双击 `start.bat` 即可**，无需再做第 2 步。
+
+### 4. 每日更新与离线单文件
+
+```bash
+python -m pipeline.release    # 拉取最新交易日 → 18 条质量门禁 → 重算 marts → 导出离线 HTML
+```
+
+- 只重建不拉数据：`python -m pipeline.release --rebuild`；只导出离线包：`python -m pipeline.export_static`。
+- 离线单文件在 `frontend/dist/ashare-radar.html`，双击即可打开；它是导出时的快照，不需要服务也不实时。
+- 更新任务、API 按钮和 Windows 脚本共用同一发布链；失败会保留上一版 HTML，已打开的离线包不会自动收到新告警。详见[发布说明](docs/release.md)。
 
 ## 数据与许可
 

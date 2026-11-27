@@ -31,9 +31,7 @@ Computes breadth, equal- and cap-weighted returns, concentration, sector partici
 
 Requirements: Python 3.12, Node 22.18+, a Tushare Pro token (additional endpoints require their own permissions).
 
-### One-click start (Windows)
-
-Double-click `start.bat`: it picks a Python with duckdb/tushare, starts the server and opens http://127.0.0.1:8000. If it is already running, it just opens the page. Double-click `stop.bat` to stop it. A missing frontend build is created with `npm install && npm run build`; if only the offline single-file build exists, the script explicitly warns that it is a non-realtime snapshot.
+### 1. Install dependencies and set the token
 
 ```bash
 git clone https://github.com/Old-Doggy/ashare-radar.git
@@ -41,37 +39,55 @@ cd ashare-radar
 conda create -n ashare-radar python=3.12 -y
 conda activate ashare-radar
 pip install -r requirements.txt
-cp .env.example .env        # set TUSHARE_TOKEN
+cp .env.example .env
 ```
 
-Build the data (pick one):
+- `.env.example` is only a template — **do not edit it**. The copied **`.env`** is the real config (git-ignored).
+- Edit **`.env`** and set `TUSHARE_TOKEN=your-token`. Without a token you can only open an existing offline snapshot; you cannot fetch or update data.
+
+### 2. Build the data (first run / rebuilding from scratch)
+
+Two steps: fetch raw market data, then compute the analytics tables.
 
 ```bash
-# A. Build from the Tushare API
-python -m pipeline.bootstrap_api --start 20240101
+# 2a. Raw data -> data/lake.duckdb (pick one)
+python -m pipeline.bootstrap_api --start 20240101   # A. directly via the Tushare API
+python -m pipeline.bootstrap                          # B. from a local parquet snapshot (layout: docs/data_setup.md)
 
-# B. Use a local parquet snapshot; layout in docs/data_setup.md
-python -m pipeline.bootstrap
-```
-
-```bash
+# 2b. Raw data -> analytics tables (required once)
 python -m pipeline.build_marts
-python -m backend.main      # http://127.0.0.1:8000
 ```
 
-Frontend and single-file build:
+- `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes ~10 minutes; a longer history (e.g. `20161201`) takes ~1–2 hours because of Tushare rate limits.
+- `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
+- Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
+
+### 3. Start the dashboard (pick one)
+
+**Option 1 (Windows, recommended): double-click `start.bat`**
+It picks a Python that has the dependencies; builds the frontend with `npm install && npm run build` when `frontend/dist` is missing; starts the server in the background and opens <http://127.0.0.1:8000>; if the server is already running it just opens the page. Use `stop.bat` to stop it.
+It only builds the frontend and starts the server — it **does not create the database**; without `data/lake.duckdb` it only tells you to do step 2 first.
+
+**Option 2 (manual):**
 
 ```bash
-cd frontend && npm ci && npm run check && cd ..
-python -m pipeline.refresh_status
-python -m pipeline.export_static
-# open frontend/dist/ashare-radar.html
+cd frontend && npm ci && npm run build && cd ..   # first run only; skip if the frontend is unchanged
+python -m backend.main                            # foreground server, Ctrl+C to stop
 ```
 
-Use `python -m pipeline.release` for daily publication, or add `--rebuild` to rebuild only.
-When upgrading from v0.3.0, build the new frontend first and run `python -m pipeline.release --rebuild` to create the rolling table and refresh the offline file.
-Failed publication preserves the previous HTML. Existing offline copies cannot receive later alerts.
-See the [release instructions](docs/release.md).
+- `backend.main`: starts the Flask server that serves both `/api/*` and the built frontend, then open <http://127.0.0.1:8000>. Without a frontend build it only serves the API, not the page.
+
+> If your working copy already contains `data/lake.duckdb` and `frontend/dist` (e.g. an existing dev checkout), **just double-click `start.bat`** — step 2 is not needed.
+
+### 4. Daily updates and the offline single file
+
+```bash
+python -m pipeline.release    # fetch the latest session -> 18 quality gates -> rebuild marts -> export offline HTML
+```
+
+- Rebuild without fetching: `python -m pipeline.release --rebuild`; export only: `python -m pipeline.export_static`.
+- The offline single file is `frontend/dist/ashare-radar.html`; double-click it to open. It is an export-time snapshot, needs no server and is not real-time.
+- The scheduled task, the API button and the Windows scripts share one publication chain; a failed run keeps the previous HTML and already-opened offline copies cannot receive later alerts. See the [release instructions](docs/release.md).
 
 ## Data & licence
 
