@@ -112,3 +112,15 @@ DuckDB 同一时刻只允许一个写连接；旧版 API 常驻只读连接，�
   失败重试与日志语义见 [release.md](release.md) 与 `scripts/install_task.ps1`。
 - 若 10 分钟仍拿不到锁，检查是否有其它进程（DBeaver、另一个 Python）占着 `lake.duckdb`。
 - 等待超时可用环境变量调整：`$env:ASHARE_RADAR_LOCK_TIMEOUT = "600"`。
+
+## 8. Tushare 限频与配额（5000 积分）
+
+官方限制（2026-11-27 查阅）：账号整体 **500 次/分钟**（常规数据每天总量无上限）；
+但 `limit_list_d` 单独限制 **200 次/分钟 + 每天 1 万次**，`stock_basic` 限制 **50 次/分钟**。
+
+本项目所有 Tushare 请求都经过 `pipeline/ratelimit.py` 的滑动窗口限速器，默认在官方上限上留
+20%–40% 余量（全局 400 次/分钟、`limit_list_d` 160 次/分钟且每天 9000 次、`stock_basic` 40 次/分钟、
+最小请求间隔 0.15 秒），并对限频错误自动指数退避重试；无权限接口（如未开通的 `limit_list_d`）
+只在第一次失败后跳过，不会反复烧配额。建库按交易日写检查点，**中断后重跑同一命令可续跑**。
+
+完整表格、环境变量与常见问题见 [rate_limits.md](rate_limits.md)。

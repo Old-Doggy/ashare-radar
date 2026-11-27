@@ -61,6 +61,7 @@ python -m pipeline.build_marts
 - `bootstrap_api` / `bootstrap`：只写入 core 原始表（daily、daily_basic、adj_factor、stk_limit、指数、资金流、两融等）。`--start` 是起始日期：`20240101` 约 1 年、10 分钟量级；要更长历史（如 `20161201`）约 1–2 小时，受 Tushare 限频影响。
 - `build_marts`：把原始表算成 `feat_stock`、`mart_market_day`、行业/轮动/月表等分析表，**建库后必须跑一次，否则页面没有数据**。如果拿到的是别人构建好的 `data/lake.duckdb`（已含 marts），本步可跳过。
 - 两步都需要 token；`limit_list_d` 等可选接口无权限时会自动跳过并告警（对应指标显示为 `—`，不显示错误数字）。
+- 请求自动限速：5000 积分常规接口 500 次/分钟，但 `limit_list_d` 是 200 次/分钟 + 1 万次/天、`stock_basic` 是 50 次/分钟；本项目默认留 20%–40% 余量，限频错误自动指数退避，无权限接口只试一次就跳过，**中断后重跑同一条命令会续跑**。详见 [docs/rate_limits.md](docs/rate_limits.md)。
 
 > **命令立刻回到提示符、没有任何输出/进度？**
 > 通常不是程序卡住，而是 `python` 不是装了依赖的那个解释器（Windows 上 `python` 常指向应用商店占位程序或另一个 Python，命令会静默退出）。先自检：
@@ -121,6 +122,7 @@ python -m pipeline.release    # 拉取最新交易日 → 18 条质量门禁 →
 | [已知限制](docs/known_limitations.md) | 15 条数据事实、修复状态与复现命令 |
 | [性能实测](docs/performance.md) | 测量时间/环境/方法、首屏与 API p50/p95 |
 | [数据源](docs/data_sources.md) | 主源、备用源、降级规则、许可限制 |
+| [Tushare 限频](docs/rate_limits.md) | 官方频次限制、默认节流参数、限频退避与配额说明 |
 | [数据准备](docs/data_setup.md) | 快照目录结构与建库步骤 |
 | [数据审计（历史）](docs/audit_findings.md) | 正确性验证与已知偏差（历史记录） |
 | [发布说明](docs/release.md) | 版本、发布检查清单、tag 流程 |

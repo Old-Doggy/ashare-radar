@@ -61,6 +61,7 @@ python -m pipeline.build_marts
 - `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes ~10 minutes; a longer history (e.g. `20161201`) takes ~1–2 hours because of Tushare rate limits.
 - `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
 - Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
+- Requests are paced automatically: at 5000 points the normal cap is 500/min, but `limit_list_d` is limited to 200/min and 10,000 calls/day and `stock_basic` to 50/min. This project keeps 20–40% headroom, retries rate-limit errors with exponential backoff, tries a permission-denied endpoint only once, and **resumes from checkpoints if you re-run the same command after an interruption**. See [docs/rate_limits.md](docs/rate_limits.md).
 
 > **The command returns to the prompt immediately with no output/progress?**
 > Usually this is not a hang: `python` is not the interpreter that has the dependencies (on Windows `python` often points to the Microsoft Store stub or another Python, which exits silently). Check first:
@@ -123,6 +124,7 @@ python -m pipeline.release    # fetch the latest session -> 18 quality gates -> 
 | [Known limitations](docs/known_limitations.md) | 15 quantified data facts, fix status and reproduction commands |
 | [Performance](docs/performance.md) | Measurement date/env/method, first paint and API p50/p95 |
 | [Data sources](docs/data_sources.md) | Primary, fallback and degradation rules |
+| [Tushare rate limits](docs/rate_limits.md) | Official quotas, default pacing, backoff and budget settings |
 | [Data setup](docs/data_setup.md) | Snapshot layout and bootstrap steps |
 | [Data audit (historical)](docs/audit_findings.md) | Correctness checks and known biases (historical) |
 | [Release notes](docs/release.md) | Versions, release checklist, tagging |

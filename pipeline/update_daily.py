@@ -25,6 +25,9 @@ import pandas as pd
 from . import settings
 from .db import session
 from .quality_gates import run_gates
+from .ratelimit import call as ts_call
+from .ratelimit import default_limiter
+from .ratelimit import is_permission_error
 from .sources import akshare_fallback as ak_fb
 from .io_utils import atomic_write_json
 from .locking import publish_lock
@@ -61,7 +64,8 @@ def ensure_calendar(pro, con: duckdb.DuckDBPyConnection, end: str) -> None:
     first = con.execute("SELECT min(cal_date) FROM core_trade_cal").fetchall()[0][0]
     start = first or settings.BOOTSTRAP_START.replace("-", "")
     # Refresh the full calendar interval, including holes and revised holiday flags.
-    df = pro.trade_cal(exchange="SSE", start_date=str(start), end_date=str(end))
+    df = ts_call("trade_cal", lambda: pro.trade_cal(
+        exchange="SSE", start_date=str(start), end_date=str(end)))
     if df is None or df.empty:
         raise RuntimeError("trade calendar unavailable")
     df = df.copy()
@@ -92,7 +96,8 @@ def update_indices(pro, con: duckdb.DuckDBPyConnection, start: str, end: str) ->
     total = 0
     for code in ["000300.SH", "000905.SH", "000852.SH", "000001.SH"]:
         try:
-            df = pro.index_daily(ts_code=code, start_date=start, end_date=end)
+            df = ts_call("index_daily", lambda: pro.index_daily(
+                ts_code=code, start_date=start, end_date=end))
         except Exception as e:
             log(f"index {code} failed: {e}")
             continue
@@ -119,7 +124,6 @@ def update_indices(pro, con: duckdb.DuckDBPyConnection, start: str, end: str) ->
         )
         total += len(df)
         con.unregister("tmp_idx")
-        time.sleep(0.3)
     log(f"indices inserted: {total}")
     return total
 
@@ -130,20 +134,25 @@ def last_loaded(con: duckdb.DuckDBPyConnection) -> str:
 
 
 def fetch(pro, ds: str, day: str) -> pd.DataFrame:
+    """拉取一个数据集；所有 Tushare 请求都经 ratelimit 节流 + 限频退避。"""
     if ds == "daily":
-        return pro.daily(trade_date=day)
+        return ts_call("daily", lambda: pro.daily(trade_date=day))
     if ds == "daily_basic":
-        return pro.daily_basic(trade_date=day)
+        return ts_call("daily_basic", lambda: pro.daily_basic(trade_date=day))
     if ds == "adj_factor":
-        return pro.adj_factor(trade_date=day)
+        return ts_call("adj_factor", lambda: pro.adj_factor(trade_date=day))
     if ds == "stk_limit":
-        return pro.stk_limit(trade_date=day)
+        return ts_call("stk_limit", lambda: pro.stk_limit(trade_date=day))
     if ds == "limit_list_d":
-        return pd.concat([pro.limit_list_d(trade_date=day, limit_type=k) for k in ("U", "D", "Z")], ignore_index=True)
+        return pd.concat(
+            [ts_call("limit_list_d", lambda k=k: pro.limit_list_d(trade_date=day, limit_type=k))
+             for k in ("U", "D", "Z")],
+            ignore_index=True,
+        )
     if ds == "moneyflow":
-        return pro.moneyflow(trade_date=day)
+        return ts_call("moneyflow", lambda: pro.moneyflow(trade_date=day))
     if ds == "margin":
-        return pro.margin(trade_date=day)
+        return ts_call("margin", lambda: pro.margin(trade_date=day))
     raise ValueError(ds)
 
 
@@ -349,6 +358,7 @@ def _run(target=None, dry=False, source="auto"):
                 raise
         bridge = (settings.ROOT / "config" / "industry_bridge.csv").as_posix().replace("'", "''")
         used = {}
+        disabled: set[str] = set()   # 无权限的数据集：跳过后续请求，避免反复烧配额
         for day in days:
             day_started = time.time()
             day_sources = {}
@@ -357,6 +367,9 @@ def _run(target=None, dry=False, source="auto"):
             transaction_active = True
             try:
                 for ds in DATASETS:
+                    if ds in disabled:
+                        day_sources[ds] = "skipped_no_permission"
+                        continue
                     df = None
                     src = "tushare"
                     failure = None
@@ -365,6 +378,10 @@ def _run(target=None, dry=False, source="auto"):
                             df = fetch(pro, ds, day)
                         except Exception as exc:
                             failure = type(exc).__name__
+                            if is_permission_error(exc):
+                                disabled.add(ds)
+                                report["warnings"].append(
+                                    f"{ds}: 无权限/积分不足，本次运行跳过该接口的后续请求")
                     if (df is None or df.empty) and source in ("auto", "akshare"):
                         try:
                             alternate = ak_fb.fetch(con, ds, day)
@@ -388,7 +405,6 @@ def _run(target=None, dry=False, source="auto"):
                     affected[ds] = insert(con, ds, df, day)
                     day_sources[ds] = src
                     _checkpoint(con, day, ds, src)
-                    time.sleep(0.35)
                 if pro is not None:
                     update_indices(pro, con, day, day)
                     n_idx = con.execute("SELECT count(DISTINCT ts_code) FROM core_index_day WHERE trade_date=?::DATE",
@@ -433,6 +449,8 @@ def _run(target=None, dry=False, source="auto"):
             for ds, table, minimum in (("margin", "core_margin_day", 2),
                                         ("moneyflow", "core_flow_day", 1),
                                         ("limit_list_d", "core_limit_event", 1)):
+                if ds in disabled:
+                    continue
                 holes = con.execute(f"""SELECT c.cal_date FROM core_trade_cal c
                     WHERE c.is_open=1 AND c.cal_date BETWEEN ? AND ?
                     AND (SELECT count(*) FROM {table} t WHERE t.trade_date=c.trade_date) < ?
@@ -452,9 +470,12 @@ def _run(target=None, dry=False, source="auto"):
                         except Exception:
                             con.execute("ROLLBACK")
                             raise
-                    except Exception:
-                        report["warnings"].append(f"{missing_day} {ds}: historical retry unavailable")
+                    except Exception as exc:
+                        report["warnings"].append(
+                            f"{missing_day} {ds}: historical retry unavailable ({type(exc).__name__})")
                         # Permission/outage should not issue thousands of identical requests.
+                        if is_permission_error(exc):
+                            disabled.add(ds)
                         break
                     time.sleep(0.35)
             # Index history has its own holes; the stock watermark cannot hide them.
@@ -470,6 +491,7 @@ def _run(target=None, dry=False, source="auto"):
     report["adj_degraded_days"] = sorted(
         d for d, src in report["sources_by_date"].items() if src.get("adj_factor") == "akshare")
     report["duration_sec"] = round(time.time() - started, 1)
+    report["rate"] = default_limiter().stats()
     status = {"status": report["status"], "last_trade_date": max(
         [d["date"] for d in report["days"]], default=last),
         "updated_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),

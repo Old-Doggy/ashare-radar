@@ -25,6 +25,9 @@ from .update_daily import DATASETS, fetch, insert, log, tushare_pro, update_indi
 from .update_daily import _checkpoint_schema, _checkpoint, _today
 from .locking import publish_lock
 from .quality_gates import run_gates
+from .ratelimit import call as ts_call
+from .ratelimit import default_limiter
+from .ratelimit import is_permission_error
 from .io_utils import atomic_write_json
 
 SCHEMA = {
@@ -69,7 +72,8 @@ def _load_meta(pro, con: duckdb.DuckDBPyConnection) -> int:
     frames = []
     for status in ("L", "D", "P"):
         try:
-            df = pro.stock_basic(exchange="", list_status=status, fields=META_FIELDS)
+            df = ts_call("stock_basic", lambda s=status: pro.stock_basic(
+                exchange="", list_status=s, fields=META_FIELDS))
             if status == "L" and (df is None or df.empty):
                 raise RuntimeError("listed stock metadata is empty")
             if df is not None and not df.empty:
@@ -97,7 +101,7 @@ def _load_meta(pro, con: duckdb.DuckDBPyConnection) -> int:
 
 
 def _load_calendar(pro, con: duckdb.DuckDBPyConnection, start: str, end: str) -> list[str]:
-    cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end)
+    cal = ts_call("trade_cal", lambda: pro.trade_cal(exchange="SSE", start_date=start, end_date=end))
     if cal is None or cal.empty:
         raise RuntimeError("trade calendar unavailable")
     con.register("cal_df", cal)
@@ -152,6 +156,7 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
         log(f"预计至少 {len(days) * 2.5 / 60:.0f} 分钟（每日限频约 2.5s + 网络）；"
             f"进度每 20 个交易日打印一次，首日会立即打印")
         started = time.time()
+        disabled: set[str] = set()   # 无权限的数据集：跳过后续请求，避免反复烧配额
         for i, day in enumerate(days, 1):
             complete = con.execute("""SELECT count(*) FROM core_dataset_checkpoint
                 WHERE trade_date=?::DATE AND completed AND dataset IN ('daily','daily_basic','adj_factor','stk_limit')""",
@@ -165,6 +170,9 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
                 affected = 0
                 day_sources = {}
                 for ds in DATASETS:
+                    if ds in disabled:
+                        day_sources[ds] = "skipped_no_permission"
+                        continue
                     try:
                         df = fetch(pro, ds, day)
                         if df is None or df.empty:
@@ -175,9 +183,12 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
                     except Exception as exc:
                         if ds in ("daily", "daily_basic", "adj_factor", "stk_limit"):
                             raise RuntimeError(f"{day} required {ds} failed") from exc
-                        warnings.append(f"{day} {ds}: {type(exc).__name__}")
+                        if is_permission_error(exc):
+                            disabled.add(ds)
+                            warnings.append(f"{ds}: 无权限/积分不足，已跳过该接口的后续所有交易日")
+                        else:
+                            warnings.append(f"{day} {ds}: {type(exc).__name__}")
                         day_sources[ds] = "unavailable"
-                    time.sleep(0.35)
                 update_indices(pro, con, day, day)
                 n_indices = con.execute("SELECT count(DISTINCT ts_code) FROM core_index_day WHERE trade_date=?::DATE",
                                         [datetime.strptime(day, "%Y%m%d").date()]).fetchall()[0][0]
@@ -204,11 +215,16 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
                 log(f"{i}/{len(days)} days, affected_rows={total:,}, "
                     f"elapsed={elapsed:.0f}s, eta={eta:.0f}s")
         result = {"status": "ok", "days": len(days), "affected_rows": total,
-                  "warnings": warnings, "sources_by_date": sources_by_date}
+                  "warnings": warnings, "sources_by_date": sources_by_date,
+                  "rate": default_limiter().stats(),
+                  "skipped_datasets": sorted(disabled)}
+        log(f"[bootstrap] 完成：{len(days)} 个交易日，请求 {result['rate']['requests']} 次，"
+            f"限速等待 {result['rate']['waited_sec']}s；无权限集合={sorted(disabled) or '无'}")
         atomic_write_json(settings.META / "bootstrap.json", result)
         atomic_write_json(settings.META / "status.json", {
             "status": "ok", "last_trade_date": days[-1] if days else None,
-            "sources": sources_by_date.get(days[-1], {}) if days else {}, "warnings": warnings})
+            "sources": sources_by_date.get(days[-1], {}) if days else {}, "warnings": warnings,
+            "skipped_datasets": sorted(disabled)})
         return result
     finally:
         con.close()
@@ -243,6 +259,12 @@ if __name__ == "__main__":
         print("[bootstrap_api] TUSHARE_TOKEN = 已配置", flush=True)
     else:
         print("[bootstrap_api] TUSHARE_TOKEN = 未配置：请复制 .env.example 为 .env 并填写 token", flush=True)
+    limits = default_limiter().stats()["limits"]
+    print(f"[bootstrap_api] 限速：全局 {limits['global_per_min']} 次/分钟；"
+          f"limit_list_d {limits['per_api_per_min'].get('limit_list_d', '默认')} 次/分钟"
+          f"（日预算 {limits['daily_total'].get('limit_list_d', '默认')}）；"
+          f"最小间隔 {limits['min_interval_sec']}s（可用环境变量覆盖，见 docs/rate_limits.md）",
+          flush=True)
     try:
         result = run(args.start, args.end, args.db)
     except Exception as exc:
