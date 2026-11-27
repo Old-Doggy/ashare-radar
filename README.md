@@ -62,6 +62,18 @@ python -m pipeline.build_marts
 - `build_marts`：把原始表算成 `feat_stock`、`mart_market_day`、行业/轮动/月表等分析表，**建库后必须跑一次，否则页面没有数据**。如果拿到的是别人构建好的 `data/lake.duckdb`（已含 marts），本步可跳过。
 - 两步都需要 token；`limit_list_d` 等可选接口无权限时会自动跳过并告警（对应指标显示为 `—`，不显示错误数字）。
 
+> **命令立刻回到提示符、没有任何输出/进度？**
+> 通常不是程序卡住，而是 `python` 不是装了依赖的那个解释器（Windows 上 `python` 常指向应用商店占位程序或另一个 Python，命令会静默退出）。先自检：
+>
+> ```bash
+> where.exe python
+> python -c "import sys, duckdb, tushare, flask; print(sys.executable, 'deps ok')"
+> ```
+>
+> 不成功就先 `conda activate ashare-radar`；或直接用项目自带的解释器选择器：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\python.ps1` 会打印一个可用的 python 路径，再执行 `& "该路径" -u -m pipeline.bootstrap_api --start 20240101`。
+>
+> 另外建议加 `-u` 让输出不缓冲；长区间放后台并记日志：`python -u -m pipeline.bootstrap_api --start 20160101 *> bootstrap.log`，再开一个窗口 `Get-Content bootstrap.log -Wait -Tail 20` 看进度。
+
 ### 3. 启动看板（二选一）
 
 **方式一（Windows 推荐）：双击 `start.bat`**

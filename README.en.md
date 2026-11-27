@@ -62,6 +62,18 @@ python -m pipeline.build_marts
 - `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
 - Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
 
+> **The command returns to the prompt immediately with no output/progress?**
+> Usually this is not a hang: `python` is not the interpreter that has the dependencies (on Windows `python` often points to the Microsoft Store stub or another Python, which exits silently). Check first:
+>
+> ```bash
+> where.exe python
+> python -c "import sys, duckdb, tushare, flask; print(sys.executable, 'deps ok')"
+> ```
+>
+> If that fails, run `conda activate ashare-radar` first, or use the bundled interpreter picker: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\python.ps1` prints a usable Python path; then run `& "<that path>" -u -m pipeline.bootstrap_api --start 20240101`.
+>
+> Add `-u` so output is unbuffered; for a long range run it in the background with a log: `python -u -m pipeline.bootstrap_api --start 20160101 *> bootstrap.log`, then `Get-Content bootstrap.log -Wait -Tail 20` in another window.
+
 ### 3. Start the dashboard (pick one)
 
 **Option 1 (Windows, recommended): double-click `start.bat`**

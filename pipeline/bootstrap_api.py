@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 import time
 from datetime import datetime
 
@@ -125,7 +127,7 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
     datetime.strptime(start, "%Y%m%d")
     datetime.strptime(end, "%Y%m%d")
     if start > end or end > _today():
-        raise ValueError("invalid bootstrap date interval")
+        raise ValueError("无效的建库日期区间：--start 必须 <= --end 且 <= 今天（格式 YYYYMMDD）")
     con = duckdb.connect(db_path or str(settings.LAKE))
     total = 0
     warnings: list[str] = []
@@ -147,6 +149,9 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
         bridge = (settings.ROOT / "config" / "industry_bridge.csv").as_posix().replace("'", "''")
         con.execute(SQL_VIEW.format(bridge=bridge))
         log(f"meta={n_meta} trading_days={len(days)} range={start}..{end}")
+        log(f"预计至少 {len(days) * 2.5 / 60:.0f} 分钟（每日限频约 2.5s + 网络）；"
+            f"进度每 20 个交易日打印一次，首日会立即打印")
+        started = time.time()
         for i, day in enumerate(days, 1):
             complete = con.execute("""SELECT count(*) FROM core_dataset_checkpoint
                 WHERE trade_date=?::DATE AND completed AND dataset IN ('daily','daily_basic','adj_factor','stk_limit')""",
@@ -193,8 +198,11 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
                 if transaction_active:
                     con.execute("ROLLBACK")
                 raise
-            if i % 20 == 0 or i == len(days):
-                log(f"{i}/{len(days)} days, affected_rows={total:,}")
+            if i <= 3 or i % 20 == 0 or i == len(days):
+                elapsed = time.time() - started
+                eta = elapsed / i * (len(days) - i) if i else 0
+                log(f"{i}/{len(days)} days, affected_rows={total:,}, "
+                    f"elapsed={elapsed:.0f}s, eta={eta:.0f}s")
         result = {"status": "ok", "days": len(days), "affected_rows": total,
                   "warnings": warnings, "sources_by_date": sources_by_date}
         atomic_write_json(settings.META / "bootstrap.json", result)
@@ -228,5 +236,24 @@ if __name__ == "__main__":
     ap.add_argument("--end", default=_today())
     ap.add_argument("--db", default=None, help="目标 DuckDB（默认 data/lake.duckdb）")
     args = ap.parse_args()
-    result = run(args.start, args.end, args.db)
-    print(result)
+    # 先打印一眼能看到的启动信息：否则命令若立刻返回，用户无法判断是否真的执行了。
+    print(f"[bootstrap_api] python = {sys.executable}", flush=True)
+    print(f"[bootstrap_api] range = {args.start}..{args.end}; db = {args.db or settings.LAKE}", flush=True)
+    if settings.TUSHARE_TOKEN:
+        print("[bootstrap_api] TUSHARE_TOKEN = 已配置", flush=True)
+    else:
+        print("[bootstrap_api] TUSHARE_TOKEN = 未配置：请复制 .env.example 为 .env 并填写 token", flush=True)
+    try:
+        result = run(args.start, args.end, args.db)
+    except Exception as exc:
+        print(f"[bootstrap_api] 失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        if isinstance(exc, ValueError):
+            print("[bootstrap_api] 检查 --start/--end：格式 YYYYMMDD、start <= end、end <= 今天",
+                  file=sys.stderr, flush=True)
+        else:
+            print("[bootstrap_api] 排查顺序：", file=sys.stderr, flush=True)
+            print("  1) python -c \"import sys, duckdb, tushare, flask; print(sys.executable)\" 是否成功", file=sys.stderr, flush=True)
+            print("  2) where.exe python 是否指向装了依赖的环境（不要用 Windows 应用商店占位程序）", file=sys.stderr, flush=True)
+            print("  3) 项目根目录 .env 是否已填 TUSHARE_TOKEN", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+    print(json.dumps(result, ensure_ascii=False, indent=1, default=str), flush=True)
