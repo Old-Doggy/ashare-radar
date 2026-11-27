@@ -59,23 +59,12 @@ python -m pipeline.build_marts
 python -m pipeline.refresh_status                     # 重跑最新交易日 18 门禁并刷新 status/quality
 ```
 
-- `bootstrap_api` / `bootstrap`：只写入 core 原始表（daily、daily_basic、adj_factor、stk_limit、指数、资金流、两融等）。`--start` 是起始日期：`20240101` 约 1 年、几分钟量级；更长历史（如 `20160101`，约 2,650 个交易日）约 **35–45 分钟**（默认 3 并发取数 + 450 次/分钟限速，`--workers` 可调）；中断后重跑同一命令会从检查点续跑。
-- `build_marts`：把原始表算成 `feat_stock`、`mart_market_day`、行业/轮动/月表等分析表，**建库后必须跑一次，否则页面没有数据**。如果拿到的是别人构建好的 `data/lake.duckdb`（已含 marts），本步可跳过。
-- `refresh_status`：用最新交易日重跑 **18 条发布门禁**，刷新 `data/meta/status.json` 与 `quality/latest.json`（数据日期、来源、告警、门禁状态），页面状态栏和 `export_static` 都读它。它不是启动页面的硬前提（bootstrap 已写过最后一次门禁），但**发布/导出静态包前建议执行**；`pipeline.release` 会自动包含这一步。
-- 两步都需要 token；`limit_list_d` 等可选接口无权限时会自动跳过并告警（对应指标显示为 `—`，不显示错误数字）。
-- 请求自动限速：5000 积分常规接口 500 次/分钟，但 `limit_list_d` 是 200 次/分钟 + 1 万次/天、`stock_basic` 是 50 次/分钟；本项目默认留约 10% 余量（450 次/分钟）且建库默认 3 并发，限频错误自动指数退避，无权限接口只试一次就跳过，**中断后重跑同一条命令会续跑**。详见 [docs/rate_limits.md](docs/rate_limits.md)。
-
-> **命令立刻回到提示符、没有任何输出/进度？**
-> 通常不是程序卡住，而是 `python` 不是装了依赖的那个解释器（Windows 上 `python` 常指向应用商店占位程序或另一个 Python，命令会静默退出）。先自检：
->
-> ```bash
-> where.exe python
-> python -c "import sys, duckdb, tushare, flask; print(sys.executable, 'deps ok')"
-> ```
->
-> 不成功就先 `conda activate ashare-radar`；或直接用项目自带的解释器选择器：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\python.ps1` 会打印一个可用的 python 路径，再执行 `& "该路径" -u -m pipeline.bootstrap_api --start 20240101`。
->
-> 另外建议加 `-u` 让输出不缓冲；长区间放后台并记日志：`python -u -m pipeline.bootstrap_api --start 20160101 *> bootstrap.log`，再开一个窗口 `Get-Content bootstrap.log -Wait -Tail 20` 看进度。
+- `bootstrap_api`：只拉 core 原始表。`--start` 起始日期；1 年几分钟，全历史约 35–45 分钟（默认 3 并发、`--workers` 可调），中断可续跑。
+- `build_marts`：原始表 → 页面用分析表，**建库后必须跑一次**（已有含 marts 的库可跳过）。
+- `refresh_status`：重跑最新交易日 18 门禁并刷新 status/quality（发布/导出前执行；`pipeline.release` 会自动包含）。
+- 需要 token；`limit_list_d` 等可选接口无权限时自动跳过（指标显示 `—`）。限速与续跑细节见
+  [docs/rate_limits.md](docs/rate_limits.md)。
+- **命令瞬间返回、没有任何输出？** 见 [docs/troubleshooting.md](docs/troubleshooting.md)——通常是 `python` 不是装了依赖的那个解释器。
 
 ### 3. 启动看板（二选一）
 
@@ -125,6 +114,7 @@ python -m pipeline.release    # 拉取最新交易日 → 18 条质量门禁 →
 | [性能实测](docs/performance.md) | 测量时间/环境/方法、首屏与 API p50/p95 |
 | [数据源](docs/data_sources.md) | 主源、备用源、降级规则、许可限制 |
 | [Tushare 限频](docs/rate_limits.md) | 官方频次限制、默认节流参数、限频退避与配额说明 |
+| [常见问题](docs/troubleshooting.md) | 安装/启动/建库/导出/限速/端口排查 |
 | [数据准备](docs/data_setup.md) | 快照目录结构与建库步骤 |
 | [数据审计（历史）](docs/audit_findings.md) | 正确性验证与已知偏差（历史记录） |
 | [发布说明](docs/release.md) | 版本、发布检查清单、tag 流程 |

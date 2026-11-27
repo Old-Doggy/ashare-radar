@@ -59,23 +59,11 @@ python -m pipeline.build_marts
 python -m pipeline.refresh_status                     # re-run 18 publish gates, refresh status/quality
 ```
 
-- `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes a few minutes; a longer history (e.g. `20160101`, ~2,650 sessions) takes about **35–45 minutes** (3 concurrent fetch workers by default + a 450 req/min cap; tune with `--workers`). Re-running the same command resumes from checkpoints after an interruption.
-- `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
-- `refresh_status`: re-runs the **18 publish gates** for the latest session and refreshes `data/meta/status.json` + `quality/latest.json` (data date, sources, warnings, gate status), which the status bar and `export_static` read. It is not a hard prerequisite for starting the dashboard (bootstrap writes a last gate report), but **run it before publishing/exporting the static bundle**; `pipeline.release` includes this step automatically.
-- Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
-- Requests are paced automatically: at 5000 points the normal cap is 500/min, but `limit_list_d` is limited to 200/min and 10,000 calls/day and `stock_basic` to 50/min. This project keeps ~10% headroom (450 req/min) and uses 3 fetch workers by default, retries rate-limit errors with exponential backoff, tries a permission-denied endpoint only once, and **resumes from checkpoints if you re-run the same command after an interruption**. See [docs/rate_limits.md](docs/rate_limits.md).
-
-> **The command returns to the prompt immediately with no output/progress?**
-> Usually this is not a hang: `python` is not the interpreter that has the dependencies (on Windows `python` often points to the Microsoft Store stub or another Python, which exits silently). Check first:
->
-> ```bash
-> where.exe python
-> python -c "import sys, duckdb, tushare, flask; print(sys.executable, 'deps ok')"
-> ```
->
-> If that fails, run `conda activate ashare-radar` first, or use the bundled interpreter picker: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\python.ps1` prints a usable Python path; then run `& "<that path>" -u -m pipeline.bootstrap_api --start 20240101`.
->
-> Add `-u` so output is unbuffered; for a long range run it in the background with a log: `python -u -m pipeline.bootstrap_api --start 20160101 *> bootstrap.log`, then `Get-Content bootstrap.log -Wait -Tail 20` in another window.
+- `bootstrap_api`: fetch the core raw tables only. `--start` is the first date; one year takes minutes, full history ~35–45 min (3 fetch workers by default, tune with `--workers`), resumable after interruption.
+- `build_marts`: raw tables → analytics tables for the dashboard; **must run once after bootstrapping** (skip if your `data/lake.duckdb` already contains marts).
+- `refresh_status`: re-runs the 18 publish gates for the latest session and refreshes status/quality (run before publishing/exporting; `pipeline.release` includes it automatically).
+- A token is required; optional endpoints such as `limit_list_d` are skipped when unavailable (metrics show `—`). Pacing/resume details: [docs/rate_limits.md](docs/rate_limits.md).
+- **Command returns instantly with no output?** See [docs/troubleshooting.md](docs/troubleshooting.md) — usually `python` is not the interpreter that has the dependencies.
 
 ### 3. Start the dashboard (pick one)
 
@@ -127,6 +115,7 @@ python -m pipeline.release    # fetch the latest session -> 18 quality gates -> 
 | [Performance](docs/performance.md) | Measurement date/env/method, first paint and API p50/p95 |
 | [Data sources](docs/data_sources.md) | Primary, fallback and degradation rules |
 | [Tushare rate limits](docs/rate_limits.md) | Official quotas, default pacing, backoff and budget settings |
+| [Troubleshooting](docs/troubleshooting.md) | Setup, start, bootstrap, export, rate-limit and port issues |
 | [Data setup](docs/data_setup.md) | Snapshot layout and bootstrap steps |
 | [Data audit (historical)](docs/audit_findings.md) | Correctness checks and known biases (historical) |
 | [Release notes](docs/release.md) | Versions, release checklist, tagging |
