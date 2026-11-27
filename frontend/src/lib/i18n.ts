@@ -1,5 +1,11 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { registerLanguageSource } from "./format";
+
+const LANGS = ["zh", "en"] as const;
+type Lang = (typeof LANGS)[number];
+const asLang = (value: unknown): Lang | null =>
+  typeof value === "string" && (LANGS as readonly string[]).includes(value) ? (value as Lang) : null;
 
 const zh = {
   brand: "A股雷达",
@@ -13,6 +19,8 @@ const zh = {
     sentiment: "情绪极端",
     watchlist: "自选组合",
     about: "方法与数据",
+    briefing: "每日简报",
+    labs: "图表实验室",
   },
   common: {
     dataAsOf: "数据截止",
@@ -32,13 +40,27 @@ const zh = {
     stale: "数据未更新",
     sample: "样本",
     source: "来源",
+    close: "关闭",
+    more: "更多",
+    morePages: "更多页面",
+    themeLight: "浅色",
+    themeDark: "深色",
+    colorblind: "色盲友好配色",
+    colorblindOn: "色盲友好（蓝/橙）",
+    command: "命令",
+    openCommand: "打开命令面板",
+    searchHint: "搜索股票、行业或页面",
+  },
+  kpi: {
+    sparkLabel: "近20日",
+    sparkHint: "近 20 个交易日走势",
   },
   state: {
     broad_up: "普涨",
     broad_down: "普跌",
     concentrated_up: "集中上涨",
-    concentrated_down: "集中下跌",
     mixed: "结构分化",
+    unknown: "未知",
   },
   metric: {
     ew: "等权收益",
@@ -168,6 +190,8 @@ const en = {
     sentiment: "Sentiment",
     watchlist: "Watchlist",
     about: "Method",
+    briefing: "Daily briefing",
+    labs: "Chart lab",
   },
   common: {
     dataAsOf: "Data as of",
@@ -187,13 +211,27 @@ const en = {
     stale: "Stale",
     sample: "sample",
     source: "source",
+    close: "Close",
+    more: "More",
+    morePages: "More pages",
+    themeLight: "Light",
+    themeDark: "Dark",
+    colorblind: "Colorblind-friendly palette",
+    colorblindOn: "Colorblind-friendly (blue/orange)",
+    command: "Commands",
+    openCommand: "Open command palette",
+    searchHint: "Search stocks, sectors, metrics",
+  },
+  kpi: {
+    sparkLabel: "20D",
+    sparkHint: "Last 20 sessions trend",
   },
   state: {
     broad_up: "Broad rally",
     broad_down: "Broad selloff",
     concentrated_up: "Narrow rally",
-    concentrated_down: "Narrow selloff",
     mixed: "Divergent",
+    unknown: "Unknown",
   },
   metric: {
     ew: "Equal-weight",
@@ -311,17 +349,37 @@ const en = {
   },
 };
 
+const readInitialLang = (): Lang => {
+  try {
+    const query = asLang(new URLSearchParams(window.location.search).get("lang"));
+    if (query) return query;
+    const stored = asLang(localStorage.getItem("bl.lang"));
+    if (stored) return stored;
+  } catch {
+    /* 无 window/localStorage 的环境回落中文 */
+  }
+  return "zh";
+};
+
+const applyDocumentLang = (language: string) => {
+  if (typeof document === "undefined") return;
+  document.documentElement.lang = language === "en" ? "en" : "zh-CN";
+};
+
 i18n.use(initReactI18next).init({
   resources: {
     zh: { translation: zh },
     en: { translation: en },
   },
-  lng:
-    (new URLSearchParams(window.location.search).get("lang") as "zh" | "en") ||
-    (localStorage.getItem("bl.lang") as "zh" | "en") ||
-    "zh",
+  lng: readInitialLang(),
   fallbackLng: "zh",
   interpolation: { escapeValue: false },
 });
+
+// money()/weekday() 不再依赖 Shell 的 useEffect：调用瞬间实时取 i18n.language（W5-01）。
+registerLanguageSource(() => i18n.language);
+// 中英切换后 <html lang> 必须同步，屏幕阅读器语音才不会错（W14-09）。
+i18n.on("languageChanged", applyDocumentLang);
+applyDocumentLang(i18n.language);
 
 export default i18n;

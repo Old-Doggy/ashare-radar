@@ -110,7 +110,13 @@ const ZoomChart = forwardRef<ZoomChartHandle, Props>(function ZoomChart(
   useImperativeHandle(
     ref,
     () => ({
-      snapshot: () => chartRef.current?.getDataURL() ?? null,
+      snapshot: () => {
+        // 换范围时 option 刚被 notMerge 替换，EChart 的 lazyUpdate 可能还没落帧；
+        // 先 flush zrender，避免交叉淡出拿到上一帧（W6-09）。
+        const inst = instRef.current;
+        if (inst && !inst.isDisposed()) inst.getZr().flush();
+        return chartRef.current?.getDataURL() ?? null;
+      },
       getWindow: () => {
         const inst = instRef.current;
         if (!inst || inst.isDisposed()) return null;

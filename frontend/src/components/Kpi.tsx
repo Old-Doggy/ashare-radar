@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { Sparkline } from "./Sparkline";
 
 interface KpiProps {
@@ -28,6 +29,7 @@ export function Kpi({
   hint,
   main = false,
 }: KpiProps) {
+  const { t, i18n } = useTranslation();
   const valueColor =
     tone === "up" ? "var(--up)" : tone === "down" ? "var(--down)" : tone === "accent" ? "var(--accent)" : "var(--text)";
   return (
@@ -39,7 +41,7 @@ export function Kpi({
             ?
           </span>
         )}
-        {!hint && delta && <span className="mono ml-auto text-[10.5px] text-[var(--muted)]">{delta}</span>}
+        {!hint && delta && <span className="mono ml-auto text-[11px] text-[var(--muted)]">{delta}</span>}
       </div>
       <div className="mt-1.5 flex items-end justify-between gap-2">
         <div
@@ -49,11 +51,11 @@ export function Kpi({
           {value}
         </div>
         {spark && spark.length > 1 && (
-          <div className="hidden shrink-0 flex-col items-end gap-0.5 pb-0.5 sm:flex" title="近 20 个交易日走势">
-            <span className="font-mono text-[9.5px] leading-none text-[var(--faint)]">近20日</span>
-            <Sparkline values={spark} tone={sparkTone || tone} width={104} height={23} />
+          <div className="hidden shrink-0 flex-col items-end gap-0.5 pb-0.5 sm:flex" title={t("kpi.sparkHint")}>
+            <span className="font-mono text-[11px] leading-none text-[var(--faint)]">{t("kpi.sparkLabel")}</span>
+            <Sparkline values={spark} tone={sparkTone || tone} width={104} height={23} lang={i18n.language} />
             {sparkDates && sparkDates.length > 1 && (
-              <div className="mono flex w-[104px] justify-between text-[8.5px] leading-none text-[var(--faint)]">
+              <div className="mono flex w-[104px] justify-between text-[11px] leading-none text-[var(--faint)]">
                 <span>{sparkDates[0].slice(5).replace("-", "/")}</span>
                 <span>{sparkDates[sparkDates.length - 1].slice(5).replace("-", "/")}</span>
               </div>

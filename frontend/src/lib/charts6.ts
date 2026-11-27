@@ -18,7 +18,8 @@ import { escapeHtml } from "./html";
 import { money } from "./format";
 import type { Bounds, Pt, Trail } from "./rotation";
 
-/** R11：系列数定义成常量，改动画时数组长度必须一起改。 */
+/** R11：系列数固定为 6（轨迹线/轨迹点/残影/位移/气泡/选中），
+ *  `rotationFrame` 返回前做长度校验，改动系列数时不会静默错位（W6-10）。 */
 export const SERIES_COUNT = 6;
 
 const L = (lang: string, zh: string, en: string) => (lang === "en" ? en : zh);
@@ -279,7 +280,7 @@ export function rotationFrame(p: Palette, d: RotationFrameData): EChartsOption["
         label: { formatter: d.focusName, show: true },
       }]
     : [];
-  return [
+  const series = [
     { data: trailLine },
     { data: trailDots },
     { data: ghost },
@@ -287,4 +288,9 @@ export function rotationFrame(p: Palette, d: RotationFrameData): EChartsOption["
     { data: bubbles },
     { data: selected },
   ] as EChartsOption["series"];
+  // W6-10：SERIES_COUNT 不再是死声明，长度不符直接暴露（只可能是代码改动导致的错位）。
+  if (!Array.isArray(series) || series.length !== SERIES_COUNT) {
+    throw new Error(`rotationFrame: expected ${SERIES_COUNT} series, got ${Array.isArray(series) ? series.length : "n/a"}`);
+  }
+  return series;
 }

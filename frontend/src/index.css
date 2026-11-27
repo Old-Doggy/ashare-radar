@@ -102,16 +102,18 @@
   --text: #1a1b1d;
   --text-2: #45413a;
   --muted: #665f53;
-  --faint: #7f7768;
+  /* W14-10：--faint/#7f7768 对 bg 仅 3.96、--accent/#a16207 仅 4.40、--copper/#9a6b16 仅 4.18，
+   * 全部加深到 bg/panel/panel2/panel3 上 ≥4.5:1（WCAG AA）。 */
+  --faint: #6b6355;
 
   --up: #a83a3a;
   --up-soft: rgba(168, 58, 58, 0.09);
   --down: #2e6b57;
   --down-soft: rgba(46, 107, 87, 0.09);
-  --accent: #a16207;
-  --accent-soft: rgba(161, 98, 7, 0.09);
-  --copper: #9a6b16;
-  --copper-soft: rgba(154, 107, 22, 0.09);
+  --accent: #8a5406;
+  --accent-soft: rgba(138, 84, 6, 0.09);
+  --copper: #7d5710;
+  --copper-soft: rgba(125, 87, 16, 0.09);
   --warn: #b54708;
   --warn-soft: rgba(181, 71, 8, 0.08);
 
@@ -283,7 +285,7 @@ body {
   border: 1px solid var(--border-strong);
   color: var(--faint);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1;
   cursor: help;
   flex: 0 0 16px;
@@ -309,6 +311,26 @@ body {
   margin-left: auto;
   color: var(--accent);
 }
+/* W14-11：390px 下原来 nowrap + overflow:hidden 会把右侧「口径说明 → / 点击下钻 →」裁掉且
+ * 不可滚动 → 小屏改为换行显示，链接始终可达（1440 仍是单行）。 */
+@media (max-width: 639px) {
+  .provline {
+    flex-wrap: wrap;
+    white-space: normal;
+    overflow: visible;
+    row-gap: 2px;
+    padding-block: 8px;
+  }
+  .provline > * {
+    min-width: 0;
+  }
+  .provline .r {
+    margin-left: auto;
+  }
+  .provline a {
+    padding: 2px 0;
+  }
+}
 
 /* subtle dotted texture is retired; kept as no-op for older pages */
 .dotgrid {
@@ -330,6 +352,9 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .rise {
+    animation: none;
+  }
+  .skeleton {
     animation: none;
   }
 }
@@ -442,7 +467,7 @@ body {
 }
 .cmdk-input kbd {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--faint);
   border: 1px solid var(--border-strong);
   border-radius: 4px;
@@ -454,7 +479,7 @@ body {
 }
 .cmdk-group {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: var(--faint);
   padding: 8px 8px 4px;
@@ -464,6 +489,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-height: 34px;
   padding: 8px;
   border-radius: 6px;
   color: var(--text-2);
@@ -472,7 +498,7 @@ body {
 }
 .cmdk-item span:last-child {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--faint);
 }
 .cmdk-item[data-on="true"] {

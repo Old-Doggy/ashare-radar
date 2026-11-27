@@ -38,12 +38,8 @@ export function verdict(m: MarketDay, lang: string): string {
     ? `${label}: ${b}% of advancing/declining stocks advanced; equal-weight return ${ew}%; CSI 300 ${idx}.`
     : `${label}：上涨占涨跌家数的 ${b}%，等权收益 ${ew}%；沪深300 ${idx}。`;
 }
-export const quadrants = [
-  { key: "broad_up", zh: "普涨", en: "Broad rally", color: "rgba(35,181,125,.05)" },
-  { key: "concentrated_up", zh: "集中上涨", en: "Narrow rally", color: "rgba(232,163,61,.05)" },
-  { key: "mixed", zh: "结构分化", en: "Divergent", color: "rgba(125,135,152,.04)" },
-  { key: "broad_down", zh: "普跌", en: "Broad selloff", color: "rgba(240,85,90,.05)" },
-];
+/** 相似日/跨年日期标签：带上年份，避免 3Y/ALL 区间出现两条相同的 "11/26"（W7-08）。 */
+export const similarDateLabel = (tradeDate: string): string => (tradeDate ? tradeDate.replace(/-/g, "/") : "—");
 
 /** Short page heading based on market breadth and equal-weight return. */
 export function headline(m: Pick<MarketDay, "ew_ret" | "breadth" | "hs300_ret">, lang = "zh"): string {

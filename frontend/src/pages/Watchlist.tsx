@@ -11,8 +11,17 @@ import { Card } from "../components/Card";
 import { PageHead } from "../components/PageHead";
 import { Kpi } from "../components/Kpi";
 import EChart from "../components/EChart";
-import { contributionChart, sectorExposureChart, type BookRow } from "../lib/charts5";
-import { holdingMetrics, portfolioReturn, parseWatchCsv, finiteQuantity } from "../lib/holdings";
+import { contributionChart, sectorExposureChart, sectorExposureGroups, type BookRow } from "../lib/charts5";
+import {
+  holdingMetrics,
+  portfolioReturn,
+  parseWatchCsv,
+  finiteQuantity,
+  quoteState,
+  watchQuoteIssues,
+  unknownWatchCodes,
+} from "../lib/holdings";
+import { downloadCsv } from "../lib/download";
 
 type Row = StockRow & { shares: number; cost: number };
 type Enriched = Row & ReturnType<typeof holdingMetrics>;
@@ -35,6 +44,21 @@ const SAMPLE_VIEW = [
   { name: "东方财富", sector: "非银金融", w: 18 },
 ];
 
+/** 股票池（代码集合）：静态包优先用 watch_pool（含 254 只 stale），
+ *  API 模式退回最新交易日个股列表；取不到时返回 null（不做池校验，不阻塞导入）。
+ *  仅用于 W9-19 的导入提示。 */
+async function loadWatchUniverse(date: string | undefined): Promise<Set<string> | null> {
+  const payload = typeof window !== "undefined" ? window.__BL_DATA__ : undefined;
+  if (payload?.watch_pool?.length) return new Set(payload.watch_pool.map((r) => r.ts_code));
+  if (!date) return null;
+  try {
+    const rows = await api.stocks(date);
+    return new Set(rows.map((r) => r.ts_code));
+  } catch {
+    return null;
+  }
+}
+
 export default function Watchlist() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -46,6 +70,8 @@ export default function Watchlist() {
   const [editing, setEditing] = useState<Record<string, { shares?: string; cost?: string }>>({});
   const [seeding, setSeeding] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
+  // W9-19：CSV 导入池校验的提示（不阻止导入）
+  const [poolWarning, setPoolWarning] = useState<string | null>(null);
 
   const { data, isPending, error, refetch } = useQuery({ queryKey: ["watchlist"], queryFn: api.watchlist });
   const { data: market } = useQuery({ queryKey: ["market-all"], queryFn: () => api.marketSeries() });
@@ -61,15 +87,21 @@ export default function Watchlist() {
   );
 
   const sorted = [...enriched].sort((a, b) => b.mv - a.mv || a.ts_code.localeCompare(b.ts_code));
-  const cny = (v: number) => `¥${Math.round(v).toLocaleString("en-US")}`;
 
+  const invested = enriched.filter((r) => r.shares > 0);
+  // W9-16：未填股数时金额/盈亏类 KPI 一律显示“—”，不再把“无持仓”显示成 0 元。
+  const anyShares = invested.length > 0;
   const totalMv = enriched.reduce((a, r) => a + r.mv, 0);
   const missingValuation = enriched.some(r => r.shares > 0 && r.quoteUnknown);
+  const mvUnknown = !anyShares || missingValuation;
   const totalCost = enriched.reduce((a, r) => a + r.cost * r.shares, 0);
   const totalPnl = enriched.reduce((a, r) => a + r.pnl, 0);
-  const incomplete = enriched.some(r => r.shares > 0 && (r.quoteUnknown || r.is_stale));
-  const todayPnl = enriched.some(r => r.today === null) ? null : enriched.reduce((a, r) => a + r.today!, 0);
-  const invested = enriched.filter((r) => r.shares > 0);
+  // W9-17：区分「代码未收录/无行情」与「报价过期」，banner 分开提示。
+  const quoteIssues = watchQuoteIssues(enriched);
+  const incomplete = quoteIssues.missing.length > 0 || quoteIssues.stale.length > 0;
+  const todayPnl = !anyShares || enriched.some(r => r.today === null)
+    ? null
+    : enriched.reduce((a, r) => a + r.today!, 0);
   const portRet = invested.length
     ? portfolioReturn(enriched)
     : enriched.length
@@ -77,6 +109,11 @@ export default function Watchlist() {
       : 0;
   const up = enriched.filter((r) => r.ret > 0).length;
   const topWeight = totalMv > 0 ? Math.max(...enriched.map((r) => r.mv), 0) / totalMv : 0;
+  // W9-15：行业暴露 pill 与图表同一口径（只统计有股数且有市值的持仓）
+  const exposureGroups = useMemo(
+    () => sectorExposureGroups(enriched as BookRow[], lang),
+    [enriched, lang],
+  );
 
   const sectorOption = useMemo(
     () => sectorExposureChart(p, enriched as BookRow[], lang),
@@ -102,22 +139,34 @@ export default function Watchlist() {
   };
 
   const exportCsv = () => {
-    const lines = ["ts_code,shares,cost", ...enriched.map((r) => `${r.ts_code},${r.shares},${r.cost}`)];
-    const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "ashare-radar_watchlist.csv";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    // 统一走 download.ts：BOM + RFC4180 引号 + 公式注入中和（W14-15）
+    downloadCsv(
+      [["ts_code", "shares", "cost"], ...enriched.map((r) => [r.ts_code, r.shares, r.cost])],
+      "ashare-radar_watchlist.csv",
+    );
   };
 
   const importCsv = async (file: File) => {
-    try { const items = parseWatchCsv(await file.text());
+    try {
+      const items = parseWatchCsv(await file.text());
+      // W9-19：格式合法但不在股票池的代码允许导入，但给出明确警告（避免组合估值静默变“—”）
+      const universe = await loadWatchUniverse(last?.trade_date);
+      const unknown = unknownWatchCodes(items.map((i) => i.ts_code), universe);
       for (const i of items) await api.addWatch(i.ts_code, i.shares, i.cost);
       setOperationError(null);
-    } catch(e) { setOperationError(String(e)); }
+      setPoolWarning(
+        unknown.length
+          ? zh
+            ? `已导入 ${items.length} 行，其中 ${unknown.length} 个代码不在股票池（可能无行情/已退市）：${unknown.slice(0, 8).join("、")}${unknown.length > 8 ? " 等" : ""}`
+            : `Imported ${items.length} rows; ${unknown.length} code(s) are not in the stock pool (no quote / delisted?): ${unknown.slice(0, 8).join(", ")}${unknown.length > 8 ? " …" : ""}`
+          : null,
+      );
+    } catch(e) { setOperationError(String(e)); setPoolWarning(null); }
     finally { qc.invalidateQueries({ queryKey: ["watchlist"] }); }
   };
+
+  const codeList = (codes: string[]) =>
+    codes.slice(0, 6).join(zh ? "、" : ", ") + (codes.length > 6 ? (zh ? " 等" : " …") : "");
 
   const remove = async (code: string) => {
     try { await api.removeWatch(code); setOperationError(null);
@@ -179,7 +228,35 @@ export default function Watchlist() {
       />
 
       {(error || operationError) && <div role="alert" className="card p-4 text-[var(--warn)]">{zh ? "持仓操作或加载未完成" : "Positions could not be loaded or saved"} · {operationError ?? String(error)} <button onClick={() => refetch()}>{zh ? "重试" : "Retry"}</button></div>}
-      {incomplete && <div role="status" className="card p-3 text-[var(--warn)]">{zh ? "部分持仓缺报价或报价已过期：旧报价仅供估值，不代表可成交价格；组合今日收益暂不可用。" : "Some quotes are missing or stale. Last quotes are valuation references, not executable prices; today's portfolio return is unavailable."}</div>}
+      {incomplete && (
+        <div role="status" className="card p-3 text-[var(--warn)]">
+          {quoteIssues.missing.length > 0 && (
+            <div>
+              {zh
+                ? `${quoteIssues.missing.length} 个代码未收录 / 无行情：${codeList(quoteIssues.missing)}。`
+                : `${quoteIssues.missing.length} code(s) not in the stock pool: ${codeList(quoteIssues.missing)}.`}
+            </div>
+          )}
+          {quoteIssues.stale.length > 0 && (
+            <div>
+              {zh
+                ? `${quoteIssues.stale.length} 个持仓只有过期报价：${codeList(quoteIssues.stale)}。`
+                : `${quoteIssues.stale.length} position(s) with stale quotes: ${codeList(quoteIssues.stale)}.`}
+            </div>
+          )}
+          <div>
+            {zh
+              ? "旧报价仅供估值，不代表可成交价格；组合今日收益暂不可用。"
+              : "Last quotes are valuation references, not executable prices; today's portfolio return is unavailable."}
+          </div>
+        </div>
+      )}
+      {poolWarning && (
+        <div role="status" className="card flex items-start justify-between gap-3 p-3 text-[var(--warn)]">
+          <span>{poolWarning}</span>
+          <button onClick={() => setPoolWarning(null)} className="shrink-0 text-[var(--muted)] hover:text-[var(--text)]" aria-label={zh ? "关闭提示" : "Dismiss"}>×</button>
+        </div>
+      )}
       {isPending ? <div className="card p-6">{zh ? "正在读取持仓…" : "Loading positions…"}</div> : !rows.length ? (
         <div className="card overflow-hidden">
           <div className="grid lg:grid-cols-[1.5fr_1fr]">
@@ -269,22 +346,37 @@ export default function Watchlist() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <Kpi label={zh ? "总市值" : "Market value"} value={money(missingValuation ? null : totalMv)} sub={zh ? `${invested.length} 只有股数` : `${invested.length} with shares`} hint={zh ? "现价 × 股数；缺报价时组合估值未知" : "Close × shares; unavailable if any quote is missing"} />
-            <Kpi label={zh ? "总成本" : "Cost"} value={money(totalCost)} sub={zh ? "按持仓成本汇总" : "At cost"} hint={zh ? "Σ 成本 × 股数" : "Σ cost × shares"} />
+            <Kpi
+              label={zh ? "总市值" : "Market value"}
+              value={mvUnknown ? "—" : money(totalMv)}
+              sub={anyShares ? (zh ? `${invested.length} 只有股数` : `${invested.length} with shares`) : zh ? "未填股数，市值未知" : "no shares entered"}
+              hint={zh ? "现价 × 股数；缺报价或未填股数时为未知" : "Close × shares; unknown if any quote is missing or no shares entered"}
+            />
+            <Kpi
+              label={zh ? "总成本" : "Cost"}
+              value={anyShares ? money(totalCost) : "—"}
+              sub={anyShares ? (zh ? "按持仓成本汇总" : "At cost") : zh ? "未填股数" : "no shares entered"}
+              hint={zh ? "Σ 成本 × 股数" : "Σ cost × shares"}
+            />
             <Kpi
               label={zh ? "浮动盈亏" : "P&L"}
-              value={missingValuation ? "—" : `${totalPnl >= 0 ? "+" : "−"}${money(Math.abs(totalPnl))}`}
-              tone={totalPnl >= 0 ? "up" : "down"}
-              sub={!missingValuation && totalCost > 0 ? `${zh ? "收益率" : "return"} ${pct(totalPnl / totalCost)}` : "—"}
+              value={mvUnknown ? "—" : `${totalPnl >= 0 ? "+" : "−"}${money(Math.abs(totalPnl))}`}
+              tone={mvUnknown ? "neutral" : totalPnl >= 0 ? "up" : "down"}
+              sub={!mvUnknown && totalCost > 0 ? `${zh ? "收益率" : "return"} ${pct(totalPnl / totalCost)}` : "—"}
             />
             <Kpi
               label={zh ? "今日盈亏" : "Today P&L"}
               value={todayPnl === null ? "—" : `${todayPnl >= 0 ? "+" : "−"}${money(Math.abs(todayPnl))}`}
-              tone={(todayPnl ?? 0) >= 0 ? "up" : "down"}
-              sub={zh ? "按前收盘参考价估算" : "Mark-to-market today"}
+              tone={todayPnl === null ? "neutral" : todayPnl >= 0 ? "up" : "down"}
+              sub={!anyShares ? (zh ? "未填股数" : "no shares entered") : zh ? "按前收盘参考价估算" : "Mark-to-market today"}
             />
             <Kpi label={zh ? "组合 vs 市场" : "Book vs market"} value={pct(portRet)} tone={trendClass(portRet) as "up" | "down" | "neutral"} sub={`${zh ? "等权市场" : "EW market"} ${pct(last?.ew_ret ?? null)}`} />
-            <Kpi label={zh ? "最大单票" : "Top holding"} value={ratio(topWeight, 0)} sub={zh ? "集中度参考" : "Concentration"} hint={zh ? "最大持仓市值 / 组合总市值" : "Largest position / total MV"} />
+            <Kpi
+              label={zh ? "最大单票" : "Top holding"}
+              value={totalMv > 0 ? ratio(topWeight, 0) : "—"}
+              sub={zh ? "集中度参考" : "Concentration"}
+              hint={zh ? "最大持仓市值 / 组合总市值；未填股数时为未知" : "Largest position / total MV; unknown without shares"}
+            />
           </div>
 
           <div className="grid grid-cols-12 gap-3.5">
@@ -293,7 +385,7 @@ export default function Watchlist() {
                 index="01"
                 title={zh ? "行业暴露" : "Sector exposure"}
                 subtitle={zh ? "按持仓市值 · 同一行业合并 · 权重 = 行业市值 / 组合市值" : "By market value, grouped by SW L1 · weight = sector MV / book MV"}
-                right={<span className="pill">{new Set(enriched.map((r) => r.sw_l1)).size} {zh ? "个行业" : "sectors"}</span>}
+                right={<span className="pill" title={zh ? "与图表同口径：仅统计填写股数且有市值的持仓" : "Same as chart: positions with shares and market value"}>{exposureGroups.length} {zh ? "个行业" : "sectors"}</span>}
                 prov={zh ? "仅统计填写了股数的持仓；未填股数仍留在表内，但不进入暴露" : "Only positions with shares count toward exposure"}
                 padded={false}
                 bodyClass="pt-0"
@@ -371,8 +463,18 @@ export default function Watchlist() {
                     return (
                       <tr key={r.ts_code} className="border-t border-[var(--border)] hover:bg-[var(--surface-2)]">
                         <td className="py-[8px] pl-2">
-                          <div className="text-[13px] text-[var(--text)]">{r.name}</div>
-                          <div className="mono text-[10.5px] text-[var(--faint)]">{r.ts_code} · {r.sw_l1}</div>{(r.is_stale || r.quote_missing) && <div className="text-[10px] text-[var(--warn)]">{zh ? "最后报价" : "Last quote"} {r.quote_date ?? "—"}</div>}
+                          {(() => {
+                            const state = quoteState(r);
+                            // W9-17：股票池外代码不再渲染成重复的“代码 代码”，标注未收录
+                            return (
+                              <>
+                                <div className="text-[13px] text-[var(--text)]">{state === "missing" ? (zh ? "未收录" : "Not found") : r.name}</div>
+                                <div className="mono text-[10.5px] text-[var(--faint)]">{r.ts_code}{r.sw_l1 ? ` · ${r.sw_l1}` : ""}</div>
+                                {state === "stale" && <div className="text-[10px] text-[var(--warn)]">{zh ? "最后报价" : "Last quote"} {r.quote_date ?? "—"}</div>}
+                                {state === "missing" && <div className="text-[10px] text-[var(--warn)]">{zh ? "股票池外 / 无行情" : "Not in stock pool / no quote"}</div>}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td className="text-right">
                           <input
@@ -395,7 +497,18 @@ export default function Watchlist() {
                           />
                         </td>
                         <td className="mono text-right text-[var(--text-2)]">{r.close?.toFixed(2) ?? "—"}</td>
-                        <td className={`mono text-right ${trendClass(r.ret)}`}>{pct(r.ret)}</td>
+                        <td className="text-right">
+                          {/* W5-12：stale 行“今日”列不再显示平盘 0.00%，显示 — 并注明最后报价日 */}
+                          {r.is_stale ? (
+                            <span className="mono text-[var(--faint)]" title={`${zh ? "最后报价" : "Last quote"} ${r.quote_date ?? "—"}`}>
+                              — <span className="text-[9.5px]">{zh ? "最后" : "last"} {r.quote_date?.slice(5) ?? "—"}</span>
+                            </span>
+                          ) : r.quote_missing ? (
+                            <span className="mono text-[var(--faint)]">—</span>
+                          ) : (
+                            <span className={`mono ${trendClass(r.ret)}`}>{pct(r.ret)}</span>
+                          )}
+                        </td>
                         <td className="mono text-right text-[var(--text-2)]">{r.mv ? money(r.mv) : "—"}</td>
                         <td className={`mono text-right ${trendClass(r.pnl)}`}>
                           {r.cost > 0 && !r.quoteUnknown ? `${money(r.pnl)} (${pct(r.pnlPct)})` : "—"}

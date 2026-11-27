@@ -24,8 +24,10 @@ export function Segmented<T extends string>({
           <button
             key={o.value}
             onClick={() => onChange(o.value)}
+            aria-pressed={active}
             className={[
-              "rounded-[6px] px-3 py-[6px] text-[12px] font-medium transition-colors duration-150",
+              // 触控目标 ≥24px（W14-10）：py 6px + 12px 行高 + 边框 ≈ 30px
+              "min-h-[28px] rounded-[6px] px-3 py-[6px] text-[12px] font-medium transition-colors duration-150",
               active
                 ? "bg-[var(--panel-3)] text-[var(--text)] shadow-[inset_0_1px_0_rgba(255,255,255,.06)]"
                 : "text-[var(--muted)] hover:text-[var(--text-2)]",

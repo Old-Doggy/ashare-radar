@@ -6,14 +6,35 @@ import { regimeOf, regimeLabel, type RegimeKey } from "./regime";
 import { escapeHtml } from "./html";
 import { axisDateLabel, pointerDateLabel, rowByDate, timeZoom, ZOOM_BOTTOM, type TimeZoom } from "./charts";
 
-export const regimeColor = (k: RegimeKey): string =>
+/** 状态色从 Palette 派生：色盲模式下涨跌自动切蓝/橙，浅色主题也与 --up/--down 一致（W6-04）。 */
+export const regimeColor = (k: RegimeKey, p: Palette): string =>
   k === "broad_up"
-    ? "#e5484d"
+    ? p.up
     : k === "concentrated_up"
-      ? "#c9a227"
+      ? p.copper
       : k === "broad_down"
-        ? "#1fa97a"
-        : "#8b94a7";
+        ? p.down
+        : k === "mixed"
+          ? p.muted
+          : p.faint;
+
+/** Regime 散点连续色的中间色（沙色）；浅色主题用更深的沙色保证对比度。 */
+export const regimeSand = (p: Palette): string => (p.bg === "#f6f2e8" ? "#a8864a" : "#a67f3f");
+
+/**
+ * Regime 散点颜色：0% 处是沙色，|ew_ret| 3% 以上饱和为涨/跌色。
+ * 旧实现把基础权重设为 0.35，导致 0% 已经偏红/偏绿（W6-14）。
+ */
+export const regimeToneColor = (v: number, p: Palette): string =>
+  mix(regimeSand(p), v >= 0 ? p.up : p.down, Math.min(1, Math.abs(v) / 3));
+
+/**
+ * Regime 页图例渐变：与 regimeToneColor 同一条曲线在 [-3,-1.5,0,1.5,3] 处采样，
+ * 图例 0% 位置正好是沙色（W6-14）。
+ */
+export function regimeLegendGradient(p: Palette): string {
+  return `linear-gradient(90deg, ${[-3, -1.5, 0, 1.5, 3].map((v) => regimeToneColor(v, p)).join(", ")})`;
+}
 
 
 const xs = (rows: MarketDay[]) => rows.map((r) => shortDate(r.trade_date));
@@ -39,7 +60,6 @@ export function treemapChart(p: Palette, stocks: StockRow[], lang = "zh"): EChar
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k)!.push(s);
   });
-  const onLight = p.bg === "#f6f2e8";
   const colorOf = (ret: number) => {
     if (Math.abs(ret) < 0.0004) return p.panel3;
     const k = Math.min(1, Math.abs(ret) / maxAbs);
@@ -82,13 +102,13 @@ export function treemapChart(p: Palette, stocks: StockRow[], lang = "zh"): EChar
     tooltip: {
       ...baseChart(p).tooltip,
       formatter: (params: unknown) => {
-        const q = params as { data?: { name?: string; ret?: number; code?: string; value?: number; other?: number } };
+        const q = params as { data?: { name?: string; ret?: number; code?: string; value?: number } };
         const d = q.data || {};
         if (d.ret === undefined) return `<div style="font-weight:600">${escapeHtml(d.name)}</div>`;
         return `<div style="min-width:150px">
           <div style="font-weight:600;margin-bottom:4px">${escapeHtml(d.name)}${d.code ? ` <span style="font-family:monospace;font-size:9px;color:${p.muted}">${escapeHtml(d.code)}</span>` : ""}</div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "涨跌", "Return")}</span><b style="color:${(d.ret || 0) >= 0 ? p.up : p.down}">${((d.ret || 0) * 100).toFixed(2)}%</b></div>
-          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "成交额", "Turnover")}</span><b>${money((d.value || 0), lang)}</b></div>${d.other ? `<div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "合并股票", "Merged")}</span><b>${d.other}</b></div>` : ""}
+          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "成交额", "Turnover")}</span><b>${money((d.value || 0), lang)}</b></div>
         </div>`;
       },
     },
@@ -143,8 +163,32 @@ export function treemapChart(p: Palette, stocks: StockRow[], lang = "zh"): EChar
   };
 }
 
-/** 集中度：Top10每5个交易日均值 + 20日均值。缺失观察不补0。 */
-export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", zoom?: TimeZoom): EChartsOption {
+/** 市场日行的可选新增列（接口约定 §2.2；api.ts 类型由 D3 更新，这里用结构兼容旧离线包）。 */
+type MarketDayQuality = MarketDay & { data_quality?: string | null };
+
+export interface ConcentrationOpts {
+  /** 区间首行之前的最多 19 行，用于预热 20 日均值；缺省时按旧行为从区间内起算（W6-02）。 */
+  lead?: MarketDay[];
+}
+
+/**
+ * 集中度：Top10 每 5 个交易日均值 + 20 日均值。缺失观察不补 0。
+ *
+ * - 5 日分组按**最新交易日右对齐**：同一末日柱在 3M/1Y/ALL 下都是完整 5 日均值，
+ *   缺口只出现在最旧的一组，切换范围不再让同一日期柱高漂移（W6-02）。
+ * - 20 日均值用 `opts.lead`（区间前最多 19 行）预热，短区间开头不再人为缺线（W6-02）。
+ * - `data_quality='partial'` 的交易日（数据层新增列；旧包无该字段时保持原样）
+ *   整组柱体用铜色标记并在 tooltip 说明，避免把部分日假尖峰当真实集中度（W6-01）。
+ * - 纵轴保留 0 基线、上限按数据自适应（最少 30%），不再固定 0–100% 压缩正常波动；
+ *   缩放模式下交给 ECharts 按窗口自适应（W6-01/W6-15）。
+ */
+export function concentrationChart(
+  p: Palette,
+  rows: MarketDay[],
+  lang = "zh",
+  zoom?: TimeZoom,
+  opts: ConcentrationOpts = {},
+): EChartsOption {
   const mean = (vals: (number | null)[], digits: number) => {
     if (!vals.length || vals.some((v) => v == null || !Number.isFinite(v))) return null;
     return +(vals.reduce<number>((sum, v) => sum + v!, 0) / vals.length).toFixed(digits);
@@ -155,22 +199,54 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", z
       if (i < w - 1) return null;
       return mean(vals.slice(i - w + 1, i + 1), 1);
     });
-  const top10 = rows.map((r) => percent(r.top10_share));
-  const avg10 = roll(top10);
 
-  const weekly: { date: string; top10: number | null; avg: number | null; gain: number | null; hhi: number | null; n: number }[] = [];
-  for (let i = 0; i < rows.length; i += 5) {
-    const chunk = rows.slice(i, i + 5);
-    const end = i + chunk.length - 1;
+  const lead = opts.lead ?? [];
+  // 20 日均值在"区间前 19 行 + 区间"上计算，再裁掉预热段；旧调用（无 lead）退化为区间内起算
+  const avgSeq = roll([...lead, ...rows].map((r) => percent(r.top10_share)));
+  const avgRange = avgSeq.slice(lead.length);
+  const partialOf = (r: MarketDay) => (r as MarketDayQuality).data_quality === "partial";
+
+  type Week = {
+    date: string;
+    top10: number | null;
+    avg: number | null;
+    gain: number | null;
+    hhi: number | null;
+    n: number;
+    partial: boolean;
+  };
+  const weekly: Week[] = [];
+  const pushChunk = (chunk: MarketDay[], endInRange: number) => {
+    if (!chunk.length) return;
     weekly.push({
-      date: rows[end].trade_date,
+      date: chunk[chunk.length - 1].trade_date,
       top10: mean(chunk.map((r) => percent(r.top10_share)), 1),
-      avg: avg10[end],
+      avg: avgRange[endInRange] ?? null,
       gain: mean(chunk.map((r) => percent(r.gain_share_top5pct)), 0),
       hhi: mean(chunk.map((r) => r.hhi ?? null), 0),
       n: chunk.length,
+      partial: chunk.some(partialOf),
     });
+  };
+  // 右对齐：最后一组恒定吃满 5 行（W6-02）
+  const offset = rows.length % 5;
+  if (offset) pushChunk(rows.slice(0, offset), offset - 1);
+  for (let i = offset; i < rows.length; i += 5) {
+    const chunk = rows.slice(i, i + 5);
+    pushChunk(chunk, i + chunk.length - 1);
   }
+
+  const finite = weekly
+    .flatMap((w) => [w.top10, w.avg])
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const dataMax = finite.length ? Math.max(...finite) : 0;
+  // 自适应上限：至少 30%，留 10% headroom，取 5 的整数倍；数据本身有上限（≤100%）
+  const yMax = Math.min(100, Math.max(30, Math.ceil((dataMax * 1.1) / 5) * 5));
+  // partial 日即使 top10_share 按契约输出 NULL（柱缺失），也用浅色带标出整组，避免与普通缺数混淆
+  const partialBands: [{ xAxis: number }, { xAxis: number }][] = [];
+  weekly.forEach((w, index) => {
+    if (w.partial) partialBands.push([{ xAxis: index - 0.5 }, { xAxis: index + 0.5 }]);
+  });
 
   return {
     ...baseChart(p),
@@ -193,6 +269,7 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", z
           <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "20 日均值", "20d avg")}</span><b>${w.avg === null ? "—" : w.avg + "%"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "涨幅前 5% 份额", "Top 5% gain share")}</span><b>${w.gain == null ? "—" : w.gain + "%"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:16px"><span>HHI</span><b>${w.hhi ?? "—"}</b></div>
+          ${w.partial ? `<div style="margin-top:6px;color:${p.copper};font-size:11px">${L(lang, "该组含数据不完整日（partial），仅作参考", "Includes partial day(s); treat with care")}</div>` : ""}
         </div>`;
       },
     },
@@ -208,8 +285,8 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", z
     yAxis: {
       type: "value",
       min: 0,
-      max: 100,
-      interval: 20,
+      // 缩放模式：让 y 轴跟随 dataZoom 过滤后的窗口自适应；非缩放：数据自适应上限
+      ...(zoom ? {} : { max: yMax }),
       ...axisStyle(p),
       axisLabel: { ...axisStyle(p).axisLabel, formatter: "{value}%" },
     },
@@ -217,10 +294,13 @@ export function concentrationChart(p: Palette, rows: MarketDay[], lang = "zh", z
       {
         name: lang === "en" ? "Top10 5-session avg" : "Top10 每5交易日均值",
         type: "bar",
-        data: weekly.map((w) => w.top10),
+        data: weekly.map((w) => (w.partial && w.top10 != null ? { value: w.top10, itemStyle: { color: p.copper, opacity: 0.62 } } : w.top10)),
         barWidth: "55%",
         itemStyle: { color: p.text2, opacity: 0.38, borderRadius: 2 },
         silent: true,
+        markArea: partialBands.length
+          ? { silent: true, itemStyle: { color: p.copper, opacity: 0.12 }, data: partialBands }
+          : undefined,
       },
       {
         name: lang === "en" ? "Top10 20d avg" : "Top10 20 日均值",
@@ -243,8 +323,6 @@ export function regimeScatter(
   trailN = 30,
 ): EChartsOption {
   const amtMax = Math.max(...rows.map((r) => r.amount || 0), 1);
-  const sand = p.bg === "#f6f2e8" ? "#a8864a" : "#a67f3f";
-  const tone = (v: number) => mix(sand, v >= 0 ? p.up : p.down, 0.35 + Math.min(1, Math.abs(v) / 3) * 0.65);
   const valid = rows.filter((r) => r.breadth != null && Number.isFinite(r.breadth));
   const data = valid.map((r) => {
     const ret = r.ew_ret * 100;
@@ -255,7 +333,7 @@ export function regimeScatter(
       rawBreadth: breadth,
       trade_date: r.trade_date,
       regime: regimeLabel(regimeOf(r), lang),
-      itemStyle: { color: tone(ret), opacity: 0.82 },
+      itemStyle: { color: regimeToneColor(ret, p), opacity: 0.82 },
     };
   });
 
@@ -282,7 +360,7 @@ export function regimeScatter(
         return `<div style="min-width:158px">
           <div style="font-family:monospace;font-size:12px;color:${p.muted};margin-bottom:5px">${escapeHtml(q.data.trade_date)}</div>
           <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "等权收益", "EW return")}</span><b style="color:${ret >= 0 ? p.up : p.down}">${ret.toFixed(2)}%</b></div>
-          <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth.toFixed(0)}%</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth.toFixed(1)}%</b></div>
           <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "分化度", "Dispersion")}</span><b>${csd == null ? "—" : (csd * 100).toFixed(2) + "pp"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:16px"><span>${L(lang, "状态", "Regime")}</span><b>${escapeHtml(q.data.regime)}</b></div>
         </div>`;

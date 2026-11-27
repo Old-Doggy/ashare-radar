@@ -7,65 +7,16 @@ import { useTranslation } from "react-i18next";
 import { Search, Star, X } from "lucide-react";
 import { api, type StockRow } from "../lib/api";
 import { useUI } from "../store/ui";
-import { paletteFor, axisStyle, baseChart, type Palette } from "../lib/theme";
-import { money, num, pct, ratio, shortDate, trendClass } from "../lib/format";
+import { paletteFor, axisStyle, baseChart } from "../lib/theme";
+import { money, num, pct, ratio, trendClass } from "../lib/format";
 import { downloadCsv } from "../lib/download";
+import { klineOption, klineSeriesModel, logCapDomain, scatterSample } from "../lib/charts3";
 import EChart from "../components/EChart";
 import { Card, MicroLabel } from "../components/Card";
 import { DataState } from "../components/DataState";
 import { PageHead } from "../components/PageHead";
 
 type SortKey = "ret" | "circ_mv" | "turnover_rate" | "amount";
-
-type Bar = { trade_date: string; open: number; high: number; low: number; close: number; vol: number };
-
-function klineOption(p: Palette, bars: Bar[]) {
-  const dates = bars.map((b) => shortDate(b.trade_date));
-  const ohlc = bars.map((b) => [b.open, b.close, b.low, b.high]);
-  const vols = bars.map((b) => ({
-    value: b.vol,
-    itemStyle: { color: b.close >= b.open ? p.up : p.down, opacity: 0.55 },
-  }));
-  return {
-    ...baseChart(p),
-    grid: [
-      { left: 4, right: 6, top: 6, height: "60%", containLabel: true },
-      { left: 4, right: 6, top: "72%", height: "16%", containLabel: true },
-    ],
-    tooltip: { ...baseChart(p).tooltip, trigger: "axis", axisPointer: { type: "cross" } },
-    xAxis: [
-      {
-        type: "category",
-        data: dates,
-        gridIndex: 0,
-        ...axisStyle(p),
-        axisLabel: { show: false },
-        splitLine: { show: false },
-      },
-      {
-        type: "category",
-        data: dates,
-        gridIndex: 1,
-        ...axisStyle(p),
-        splitLine: { show: false },
-        axisLabel: { ...axisStyle(p).axisLabel, fontSize: 11, interval: Math.max(0, Math.floor(dates.length / 4)) },
-      },
-    ],
-    yAxis: [
-      { scale: true, gridIndex: 0, ...axisStyle(p), axisLabel: { ...axisStyle(p).axisLabel, fontSize: 11 } },
-      { gridIndex: 1, axisLabel: { show: false }, splitLine: { show: false } },
-    ],
-    series: [
-      {
-        type: "candlestick",
-        data: ohlc,
-        itemStyle: { color: p.up, color0: p.down, borderColor: p.up, borderColor0: p.down },
-      },
-      { type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: vols, barWidth: "62%" },
-    ],
-    dataZoom: [{ type: "inside", xAxisIndex: [0, 1], start: 55, end: 100 }],
-  } as never;
-}
 
 export default function Stocks() {
   const { t, i18n } = useTranslation();
@@ -117,6 +68,11 @@ export default function Stocks() {
     enabled: !!sel,
   });
 
+  // P1-6 / W9-02：K 线使用前复权 OHLC（新契约 payload/API 已按窗口最后 adj_factor 归一）；
+  // 旧 6 元组 payload 没有 adj_factor，此时 model.adjusted=false，卡片标注“未复权”。
+  // api.ts（D3）已把两种数据源归一为 StockSeriesPoint；这里仍兼容元组输入（旧离线包）。
+  const kline = useMemo(() => klineSeriesModel(series ?? []), [series]);
+
   const all = stocks ?? [];
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -134,8 +90,9 @@ export default function Stocks() {
   const scatterPool = useMemo(() => {
     const q = query.trim().toLowerCase();
     const base = q ? all.filter((s) => s.name?.toLowerCase().includes(q) || s.ts_code.toLowerCase().includes(q)) : all;
-    const step = Math.max(1, Math.ceil(base.length / 800));
-    return base.filter((_, i) => i % step === 0);
+    // W9-01：等距抽样会丢掉极端市值点（当前 payload 5 只万亿市值股都不在抽样池内），
+    // 因此额外强制保留市值最大的 8 只，保证“可见点”与“轴域”一致。
+    return scatterSample(base, 800, 8);
   }, [all, query]);
 
   const scatterOption = useMemo(() => {
@@ -159,9 +116,12 @@ export default function Stocks() {
     const ys = pts.map((x) => x.value[1]);
     const ymax = Math.max(21, ...ys.map((v) => Math.ceil(v + 1)));
     const ymin = Math.min(-21, ...ys.map((v) => Math.floor(v - 1)));
+    // W9-01：x 轴按数据上界自适应（不再硬编码 [0,4]），万亿市值点不会被裁掉。
+    const capDomain = logCapDomain(pts.map((x) => x.value[0]));
     return {
       ...baseChart(p),
-      grid: { left: 8, right: 14, top: 16, bottom: 24, containLabel: true },
+      // right 留白给 x 轴最右端「N.N万亿」标签（showMaxLabel），否则会被画布裁掉半个字。
+      grid: { left: 8, right: 34, top: 16, bottom: 24, containLabel: true },
       tooltip: {
         ...baseChart(p).tooltip,
         formatter: (params: unknown) => {
@@ -178,14 +138,20 @@ export default function Stocks() {
       },
       xAxis: {
         type: "value",
-        min: 0,
-        max: 4,
+        min: capDomain.min,
+        max: capDomain.max,
         ...axisStyle(p),
         axisLabel: {
           ...axisStyle(p).axisLabel,
-          formatter: (v: number) => `${Math.round(Math.pow(10, v))}亿`,
+          formatter: (v: number) => {
+            const yi = Math.pow(10, v);
+            if (yi >= 1e4) return `${(yi / 1e4).toFixed(1)}万亿`;
+            if (yi >= 100) return `${Math.round(yi)}亿`;
+            return `${yi.toFixed(1)}亿`;
+          },
           fontSize: 11,
-          showMaxLabel: false,
+          showMaxLabel: true,
+          showMinLabel: true,
         },
       },
       yAxis: {
@@ -362,8 +328,8 @@ export default function Stocks() {
             title={`${lang === "en" ? "Size × return" : "市值 × 收益"} · ${d}`}
             subtitle={
               lang === "en"
-                ? "x = float cap (log) · y = daily return · outlined dots are limit moves"
-                : "横轴 = 流通市值（对数）· 纵轴 = 当日收益 · 描边为涨跌停"
+                ? "x = float cap (log, scaled to data) · y = daily return · outlined dots are limit moves"
+                : "横轴 = 流通市值（对数，按数据上界自适应）· 纵轴 = 当日收益 · 描边为涨跌停"
             }
             right={
               <span className="text-[11px] text-[var(--faint)]">
@@ -396,7 +362,7 @@ export default function Stocks() {
                   <span className="mono text-[11px] font-normal text-[var(--faint)]">{sel.ts_code}</span>
                 </span>
               }
-              subtitle={`${sel.sw_l1} · ${sel.market}`}
+              subtitle={`${sel.sw_l1} · ${sel.market}${kline.bars.length > 1 ? (kline.adjusted ? (zh ? " · 前复权" : " · qfq") : zh ? " · 未复权" : " · unadjusted") : ""}`}
               right={
                 <button
                   onClick={() => setSel(null)}
@@ -406,10 +372,21 @@ export default function Stocks() {
                 </button>
               }
             >
-              {series && series.length > 1 ? (
-                <div className="mb-3 h-[210px]">
-                  <EChart option={klineOption(p, series)} />
-                </div>
+              {kline.bars.length > 1 ? (
+                <>
+                  <div className="mb-1 h-[210px]">
+                    <EChart option={klineOption(p, kline, lang)} />
+                  </div>
+                  <div className={`mb-3 font-mono text-[10px] leading-relaxed ${kline.adjusted ? "text-[var(--faint)]" : "text-[var(--warn)]"}`}>
+                    {kline.adjusted
+                      ? zh
+                        ? "前复权 · 按窗口最后复权因子归一；tooltip 显示原始收盘与真实当日涨跌"
+                        : "qfq · normalized by the window's latest adj_factor; tooltip shows raw close and true daily return"
+                      : zh
+                        ? "未复权 · 离线包未含复权因子，除权日会出现价格跳空"
+                        : "Unadjusted · export has no adj_factor; ex-rights days show price gaps"}
+                  </div>
+                </>
               ) : (
                 <div className="mb-3 rounded-md border border-dashed border-[var(--border)] px-2 py-3 text-center text-[11px] text-[var(--faint)]">
                   {lang === "en"
@@ -513,24 +490,29 @@ export default function Stocks() {
               onClick={() =>
                 downloadCsv(
                   [
-                    ["ts_code", "name", "sector", "ret", "circ_mv", "turnover_rate", "amount", "pe_ttm", "pb"],
+                    // W9-07：表头写单位，ret 导出为百分数，避免把小数/万元当元误读。
+                    ["ts_code", "name", "sector", "ret_pct", "circ_mv_wan", "turnover_rate_pct", "amount_yuan", "pe_ttm", "pb"],
                     ...filtered.map((r) => [
                       r.ts_code,
                       r.name,
                       r.sw_l1,
-                      r.ret,
-                      r.circ_mv,
-                      r.turnover_rate,
-                      r.amount,
-                      r.pe_ttm,
-                      r.pb,
+                      r.ret == null || !Number.isFinite(r.ret) ? null : +(r.ret * 100).toFixed(4),
+                      r.circ_mv ?? null,
+                      r.turnover_rate ?? null,
+                      r.amount ?? null,
+                      r.pe_ttm ?? null,
+                      r.pb ?? null,
                     ]),
                   ],
                   `ashare-radar_stocks_${d ?? ""}.csv`,
                 )
               }
               className="ml-1 h-[28px] rounded-md border border-[var(--border)] px-2.5 text-[11.5px] text-[var(--muted)] hover:text-[var(--text)]"
-              title={lang === "en" ? "Export filtered rows" : "导出当前筛选结果"}
+              title={
+                lang === "en"
+                  ? "Export filtered rows (ret_pct=%, circ_mv_wan=10k CNY, turnover_rate_pct=%, amount_yuan=CNY)"
+                  : "导出当前筛选结果（ret_pct=%，circ_mv_wan=万元，turnover_rate_pct=%，amount_yuan=元）"
+              }
             >
               CSV
             </button>

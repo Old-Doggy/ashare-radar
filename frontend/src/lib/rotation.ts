@@ -262,3 +262,128 @@ export function leadingIndices(ranks: readonly (number | null)[]): number[] {
   const best = Math.min(...ranks.filter(finite));
   return ranks.flatMap((rank, i) => rank === best ? [i] : []);
 }
+
+/* ===== 行业页（Sectors）展示口径纯函数：排序 / 默认选中 / breadth 文案 / 分布条 / 月度热力 =====
+ * 这些函数只做展示口径，不重算后端指标；放在本模块是因为它们与轮动同属行业页，
+ * 且模块无运行时依赖，`node --experimental-strip-types` 可直接单测。 */
+
+export interface SectorBoardRow {
+  sw_l1: string;
+  breadth: number | null;
+  ew_ret?: number | null;
+}
+
+const valueOr = (v: number | null | undefined, fallback: number): number => (finite(v) ? v : fallback);
+
+/** 行业广度榜排序：广度降序 → 等权收益降序 → 名称码位（W8-03）。
+ *  加入 tiebreak 后，API（ew_ret DESC）与静态 payload（trade_date, sw_l1）两路径名次一致。 */
+export function sortSectorBoard<T extends SectorBoardRow>(rows: readonly T[]): T[] {
+  return rows.slice().sort((a, b) => {
+    const ba = valueOr(a.breadth, -Infinity);
+    const bb = valueOr(b.breadth, -Infinity);
+    if (ba !== bb) return bb - ba;
+    const ea = valueOr(a.ew_ret, -Infinity);
+    const eb = valueOr(b.ew_ret, -Infinity);
+    if (ea !== eb) return eb - ea;
+    return a.sw_l1.localeCompare(b.sw_l1, "zh");
+  });
+}
+
+/** 默认选中行业（W8-02）：显式参数存在则优先；否则按确定规则取（广度最大→收益最大→名称）。
+ *  绝不使用 rows[0]，因此在线 API 与离线 payload 首屏选中的是同一行业。 */
+export function pickDefaultSector(
+  rows: readonly SectorBoardRow[],
+  preferred?: string | null,
+): string | null {
+  if (preferred && rows.some((r) => r.sw_l1 === preferred)) return preferred;
+  const board = sortSectorBoard(rows);
+  return board.length ? board[0].sw_l1 : null;
+}
+
+/** breadth 口径文案（W8-06）：契约 = 上涨家数/(上涨+下跌)，平盘剔除。
+ *  页面标题/副标题/口径说明统一走这一句，避免再写成“上涨股票占比/100% 的股票在涨”。 */
+export function breadthBasisText(lang: string): string {
+  return lang === "en"
+    ? "advancers / (advancers + decliners); flats excluded"
+    : "上涨家数 /（上涨 + 下跌），平盘剔除";
+}
+
+/** q10–q90 分布条轴域（W8-05）：默认 ±11%，数据越界时按 |q10|/|q90| 自适应并向上取整到 1%。
+ *  返回的是半宽（如 0.21 表示 ±21%），条形位置统一用 distributionPercent 映射，不再静默截尾。 */
+export function distributionDomain(
+  q10: number | null | undefined,
+  q90: number | null | undefined,
+  floor = 0.11,
+): number {
+  const values = [q10, q90].filter(finite).map((v) => Math.abs(v));
+  const dom = Math.max(floor, ...values);
+  if (!finite(dom) || dom <= 0) return floor;
+  // 向上取整到 1%，减去微小容差避免 0.11*100=11.0000001 被进到 12
+  return Math.ceil(dom * 100 - 1e-6) / 100;
+}
+
+/** 把收益映射到分布条 0..100 位置；未知返回 null（调用方保持“—”/不画）。 */
+export function distributionPercent(
+  value: number | null | undefined,
+  domain: number,
+): number | null {
+  if (!finite(value) || !finite(domain) || domain <= 0) return null;
+  return Math.max(0, Math.min(100, ((value + domain) / (2 * domain)) * 100));
+}
+
+export interface HeatRow {
+  name: string;
+  score: number | null;
+  values: (number | null)[];
+}
+
+/** 月度热力排序（W8-07）：有 score 的按累计收益降序，缺月的行保留并排到末尾（灰显），
+ *  同分按名称码位，保证行数 = 行业总数而不是被 filter 掉。 */
+export function sortHeatRows<T extends { name: string; score: number | null }>(rows: readonly T[]): T[] {
+  return rows.slice().sort((a, b) => {
+    const sa = finite(a.score) ? a.score : null;
+    const sb = finite(b.score) ? b.score : null;
+    if (sa !== null && sb !== null && sa !== sb) return sb - sa;
+    if (sa === null && sb !== null) return 1;
+    if (sa !== null && sb === null) return -1;
+    return a.name.localeCompare(b.name, "zh");
+  });
+}
+
+/** 月度热力分组：all=全部行业一组；focus=领涨/落后各 split 个（缺月行自然落在末尾组）。
+ *  返回值中缺月行仍然存在，由 MonthlyGrid 灰显。 */
+export function heatGroups<T extends { name: string; score: number | null }>(
+  rows: readonly T[],
+  scope: "focus" | "all",
+  split = 6,
+): T[][] {
+  const sorted = sortHeatRows(rows);
+  if (!sorted.length) return [];
+  if (scope === "all") return [sorted];
+  if (sorted.length <= split * 2) return [sorted];
+  return [sorted.slice(0, split), sorted.slice(-split)];
+}
+
+export function missingHeatCount(rows: readonly { score: number | null }[]): number {
+  return rows.filter((r) => !finite(r.score)).length;
+}
+
+/* ===== 无障碍：reduced-motion 初始平滑（W8-04） ===== */
+
+/** 常规默认平滑半衰期（“更强”档） */
+export const DEFAULT_SMOOTH_HALF_LIFE = 20;
+/** prefers-reduced-motion 命中的初始平滑半衰期：必须比常规默认**更狠**（半衰期越长帧间运动越小）。 */
+export const REDUCED_MOTION_SMOOTH_HALF_LIFE = 32;
+
+/** W8-04：reduced-motion 的初始平滑方向修正。
+ *  旧实现取 12（低于常规 20），导致减少动态效果的用户反而得到更大帧间运动。 */
+export function initialSmoothHalfLife(reduceMotion: boolean): number {
+  return reduceMotion ? REDUCED_MOTION_SMOOTH_HALF_LIFE : DEFAULT_SMOOTH_HALF_LIFE;
+}
+
+/** 轮动面板“领涨/领跌”标签的方向色（CR2-03）：
+ *  收益未知时保持中性（flat），不得用 `(ret ?? 0) >= 0` 把 null 染成上涨色。 */
+export function leaderRetTone(ret: number | null | undefined): "up" | "down" | "flat" {
+  if (!finite(ret) || ret === 0) return "flat";
+  return ret > 0 ? "up" : "down";
+}

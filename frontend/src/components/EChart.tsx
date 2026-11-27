@@ -1,6 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
+import { prefersReducedMotion } from "../lib/theme";
 
 interface Props {
   option: EChartsOption;
@@ -23,6 +25,7 @@ const EChart = forwardRef<EChartHandle, Props>(function EChart(
   { option, height = "100%", className, onEvents, ariaLabel, onReady },
   ref,
 ) {
+  const { i18n } = useTranslation();
   const hostRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<echarts.ECharts | null>(null);
   const onReadyRef = useRef(onReady);
@@ -37,7 +40,7 @@ const EChart = forwardRef<EChartHandle, Props>(function EChart(
     instRef.current = inst;
     const teardown = onReadyRef.current?.(inst);
     const ro = new ResizeObserver(() => {
-      if (!inst.isDisposed()) inst.resize({ animation: { duration: 180 } });
+      if (!inst.isDisposed()) inst.resize({ animation: { duration: prefersReducedMotion() ? 0 : 180 } });
     });
     ro.observe(hostRef.current);
     return () => {
@@ -70,19 +73,24 @@ const EChart = forwardRef<EChartHandle, Props>(function EChart(
       getDataURL: (backgroundColor = "transparent") => {
         const inst = instRef.current;
         if (!inst || inst.isDisposed()) return null;
+        // 先 flush：否则拿到的是上一帧（W6-09，与 LiveChart 行为一致）。
+        inst.getZr().flush();
         return inst.getDataURL({ type: "png", pixelRatio: 2, backgroundColor });
       },
     }),
     [],
   );
 
+  // W14-08：11 个图表容器曾只有 role="img" 没有名字；页面应传具体 ariaLabel，
+  // 未传时也至少给一个可读名称，屏幕阅读器不会只读出「图像」。
+  const fallbackLabel = i18n.language === "en" ? "Chart" : "图表";
   return (
     <div
       ref={hostRef}
       className={className}
       style={{ height, width: "100%" }}
       role="img"
-      aria-label={ariaLabel}
+      aria-label={ariaLabel || fallbackLabel}
     />
   );
 });

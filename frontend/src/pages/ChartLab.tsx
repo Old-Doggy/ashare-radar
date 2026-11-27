@@ -6,10 +6,10 @@ import type { EChartsOption } from "echarts";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, type MarketDay, type SectorDay } from "../lib/api";
+import { api, distributionCoverage, type DistributionStats, type MarketDay, type SectorDay } from "../lib/api";
 import { useUI } from "../store/ui";
 import { paletteFor, axisStyle, baseChart, type Palette } from "../lib/theme";
-import { money, pct, shortDate } from "../lib/format";
+import { money, num, pct, shortDate } from "../lib/format";
 import { treemapChart } from "../lib/charts2";
 import { PageHead } from "../components/PageHead";
 import { Card } from "../components/Card";
@@ -32,7 +32,7 @@ const tone = (p: Palette, v: number, max = 3) => mix(sand(p), v >= 0 ? p.up : p.
 
 function GradientKey({ p, left, right }: { p: Palette; left: string; right: string }) {
   return (
-    <div className="flex items-center gap-2 text-[10.5px] text-[var(--faint)]">
+    <div className="flex items-center gap-2 text-[11px] text-[var(--faint)]">
       <span>{left}</span>
       <span className="h-[7px] w-32 rounded-full" style={{ background: `linear-gradient(90deg, ${p.down}, ${sand(p)}, ${p.up})` }} />
       <span>{right}</span>
@@ -125,10 +125,10 @@ function regimeOption(p: Palette, rows: MarketDay[], lang: string): EChartsOptio
       },
     ],
     graphic: [
-      { type: "text", left: "23%", top: 40, style: { text: lang === "en" ? "DIVERGENT" : "结构分化", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", right: "7%", top: 40, style: { text: lang === "en" ? "BROAD RALLY" : "普涨", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", left: "23%", bottom: 46, style: { text: lang === "en" ? "BROAD SELLOFF" : "普跌", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", right: "7%", bottom: 46, style: { text: lang === "en" ? "NARROW RALLY" : "集中上涨", fill: p.faint, fontSize: 10.5 } },
+      { type: "text", left: "23%", top: 40, style: { text: lang === "en" ? "DIVERGENT" : "结构分化", fill: p.faint, fontSize: 11 } },
+      { type: "text", right: "7%", top: 40, style: { text: lang === "en" ? "BROAD RALLY" : "普涨", fill: p.faint, fontSize: 11 } },
+      { type: "text", left: "23%", bottom: 46, style: { text: lang === "en" ? "BROAD SELLOFF" : "普跌", fill: p.faint, fontSize: 11 } },
+      { type: "text", right: "7%", bottom: 46, style: { text: lang === "en" ? "NARROW RALLY" : "集中上涨", fill: p.faint, fontSize: 11 } },
     ],
   } as EChartsOption;
 }
@@ -226,15 +226,15 @@ function regimeHexOption(p: Palette, rows: MarketDay[], lang: string): EChartsOp
         data: [[last.ew_ret * 100, last.breadth * 100]],
         symbolSize: 12,
         itemStyle: { color: p.up, borderColor: p.bg, borderWidth: 2 },
-        label: { show: true, position: "top", distance: 7, formatter: last.trade_date, color: p.up, fontSize: 10.5 },
+        label: { show: true, position: "top", distance: 7, formatter: last.trade_date, color: p.up, fontSize: 11 },
         z: 5,
       },
     ],
     graphic: [
-      { type: "text", left: "23%", top: 40, style: { text: lang === "en" ? "DIVERGENT" : "结构分化", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", right: "5%", top: 40, style: { text: lang === "en" ? "BROAD RALLY" : "普涨", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", left: "23%", bottom: 46, style: { text: lang === "en" ? "BROAD SELLOFF" : "普跌", fill: p.faint, fontSize: 10.5 } },
-      { type: "text", right: "5%", bottom: 46, style: { text: lang === "en" ? "NARROW RALLY" : "集中上涨", fill: p.faint, fontSize: 10.5 } },
+      { type: "text", left: "23%", top: 40, style: { text: lang === "en" ? "DIVERGENT" : "结构分化", fill: p.faint, fontSize: 11 } },
+      { type: "text", right: "5%", top: 40, style: { text: lang === "en" ? "BROAD RALLY" : "普涨", fill: p.faint, fontSize: 11 } },
+      { type: "text", left: "23%", bottom: 46, style: { text: lang === "en" ? "BROAD SELLOFF" : "普跌", fill: p.faint, fontSize: 11 } },
+      { type: "text", right: "5%", bottom: 46, style: { text: lang === "en" ? "NARROW RALLY" : "集中上涨", fill: p.faint, fontSize: 11 } },
     ],
   } as EChartsOption;
 }
@@ -393,7 +393,12 @@ function bubbleOption(p: Palette, rows: SectorDay[], lang: string): EChartsOptio
 /* ------------------------------------------------------------------ */
 /* 04 · distribution with continuous bin colours                       */
 /* ------------------------------------------------------------------ */
-function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: number }[], stats: { med: number; mean: number; sd: number }, lang: string): EChartsOption {
+function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: number }[], stats: Pick<DistributionStats, "med">, lang: string): EChartsOption {
+  // W9-04：bins 只覆盖 ±11%（5000+ 只里的 43 个箱），首末箱不是「区间外汇总箱」，
+  // 因此 tooltip 不再加 ≤/≥ 前缀，而是显示该箱真实区间；区间外只计数、不绘制（见卡脚注）。
+  const medianLine = stats.med == null ? [] : [
+    { xAxis: Math.max(0, bins.findIndex((b) => b.lo <= stats.med! && b.hi > stats.med!)), label: { formatter: `${lang === "en" ? "Median" : "中位"} ${(stats.med * 100).toFixed(1)}%`, position: "insideEndTop" as const } },
+  ];
   return {
     ...baseChart(p),
     grid: { left: 12, right: 18, top: 28, bottom: 32, containLabel: true },
@@ -404,7 +409,7 @@ function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: nu
         const i = (params as { dataIndex: number }[])[0]?.dataIndex ?? 0;
         const b = bins[i];
         if (!b) return "";
-        return `<div style="font-family:monospace;font-size:12px;color:${p.muted};margin-bottom:5px">${i === 0 ? "≤" : i === bins.length-1 ? "≥" : ""}${(((b.lo + b.hi) / 2) * 100).toFixed(1)}%</div><b>${b.n}</b> ${lang === "en" ? "stocks" : "只"}`;
+        return `<div style="font-family:monospace;font-size:12px;color:${p.muted};margin-bottom:5px">${(b.lo * 100).toFixed(1)}% – ${(b.hi * 100).toFixed(1)}%</div><b>${b.n}</b> ${lang === "en" ? "stocks" : "只"}`;
       },
     },
     xAxis: {
@@ -412,7 +417,7 @@ function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: nu
       data: bins.map((b) => (((b.lo + b.hi) / 2) * 100).toFixed(1)),
       ...axisStyle(p),
       splitLine: { show: false },
-      axisLabel: { ...axisStyle(p).axisLabel, fontSize: 10.5, interval: Math.max(0, Math.floor(bins.length / 9)) },
+      axisLabel: { ...axisStyle(p).axisLabel, fontSize: 11, interval: Math.max(0, Math.floor(bins.length / 9)) },
       name: lang === "en" ? "Stock return" : "个股收益",
       nameLocation: "middle",
       nameGap: 24,
@@ -421,7 +426,7 @@ function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: nu
     yAxis: {
       type: "value",
       ...axisStyle(p),
-      axisLabel: { ...axisStyle(p).axisLabel, fontSize: 10.5 },
+      axisLabel: { ...axisStyle(p).axisLabel, fontSize: 11 },
       splitNumber: 4,
     },
     series: [
@@ -437,10 +442,10 @@ function distOption(p: Palette, bins: { b: number; n: number; lo: number; hi: nu
           silent: true,
           symbol: "none",
           lineStyle: { color: p.axis, type: "dashed", width: 1 },
-          label: { color: p.muted, fontSize: 10 },
+          label: { color: p.muted, fontSize: 11 },
           data: [
             { xAxis: Math.max(0, bins.findIndex((b) => b.lo <= 0 && b.hi > 0)), label: { formatter: "0%", position: "end" } },
-            { xAxis: Math.max(0, bins.findIndex((b) => b.lo <= stats.med && b.hi > stats.med)), label: { formatter: `${lang === "en" ? "Median" : "中位"} ${(stats.med * 100).toFixed(1)}%`, position: "insideEndTop" } },
+            ...medianLine,
           ],
         },
       },
@@ -493,6 +498,7 @@ export default function ChartLab() {
   const [labSector, setLabSector] = useState<string | null>(null);
 
   const rows = (market ?? []).filter((r) => r.breadth != null && Number.isFinite(r.breadth));
+  const distCov = distributionCoverage(distribution);
   const small = useMemo(() => {
     if (!monthly?.length) return null;
     const months = [...new Set(monthly.map((r) => r.month))].sort().slice(-12);
@@ -507,6 +513,16 @@ export default function ChartLab() {
     }).filter((row): row is { name: string; values: (number | null)[]; score: number } => row.score != null).sort((a, b) => b.score - a.score);
     return { top: all.slice(0, 6), bottom: all.slice(-6).reverse() };
   }, [monthly]);
+
+  /* W9-20：「12M 累计排序」的窗口包含未完成的当月，需要标注「含当月至今」。 */
+  const monthNote = useMemo(() => {
+    if (!monthly?.length) return null;
+    const lastMonth = [...new Set(monthly.map((r) => r.month))].sort().pop() ?? "";
+    const ofMonth = monthly.filter((r) => r.month === lastMonth);
+    const nDays = Math.max(...ofMonth.map((r) => r.n_days ?? 0), 0);
+    const partial = !!d && lastMonth.slice(0, 7) === d.slice(0, 7);
+    return { lastMonth: lastMonth.slice(0, 7), nDays, partial };
+  }, [monthly, d]);
 
   if (only === "rotation") {
     return (
@@ -573,7 +589,7 @@ export default function ChartLab() {
           footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "750 个交易日" : "750 sessions"}</span><span className="r">{zh ? "当日点：红圈" : "today: red ring"}</span></div>}
         >
           <div className={only === "regime" ? "h-[620px] px-2 pb-2" : "h-[440px] px-2 pb-2"}>
-            {rows.length ? <EChart option={regimeOption(p, rows, lang)} /> : <DataState />}
+            {rows.length ? <EChart option={regimeOption(p, rows, lang)} ariaLabel={zh ? "收益×广度连续渐变状态云：750 个交易日的市场状态散点，点大小按成交额缩放" : "Return × breadth gradient cloud: 750 sessions of market states, dot size scaled by turnover"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -591,7 +607,7 @@ export default function ChartLab() {
           footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "750 个交易日" : "750 sessions"}</span><span className="r">{zh ? "无点重叠" : "no overplotting"}</span></div>}
         >
           <div className={only === "regime-hex" ? "h-[620px] px-2 pb-2" : "h-[440px] px-2 pb-2"}>
-            {rows.length ? <EChart option={regimeHexOption(p, rows, lang)} /> : <DataState />}
+            {rows.length ? <EChart option={regimeHexOption(p, rows, lang)} ariaLabel={zh ? "收益×广度六边形聚合：每个六边形为一个收益/广度格子，大小表示交易日数" : "Return × breadth hexbin: one hex per return/breadth bin, size shows session count"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -608,7 +624,7 @@ export default function ChartLab() {
           footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "近 240 个交易日" : "last 240 sessions"}</span><span className="r">{zh ? "悬停看广度" : "hover for breadth"}</span></div>}
         >
           <div className={only === "tape" ? "h-[480px] px-2 pb-2" : "h-[340px] px-2 pb-2"}>
-            {rows.length ? <EChart option={tapeOption(p, rows, lang)} /> : <DataState />}
+            {rows.length ? <EChart option={tapeOption(p, rows, lang)} ariaLabel={zh ? "日度等权收益渐变针线图：近 240 个交易日，自动标注区间最大涨跌" : "Daily equal-weight return lollipop: last 240 sessions with extremes annotated"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -626,7 +642,7 @@ export default function ChartLab() {
           footer={<div className="provline"><span>SOURCE <b>sw_daily</b></span><span>{zh ? "31 个申万一级行业" : "31 SW L1 sectors"}</span><span className="r">{zh ? "悬停看成交额" : "hover for turnover"}</span></div>}
         >
           <div className={only === "bubble" ? "h-[620px] px-2 pb-2" : "h-[430px] px-2 pb-2"}>
-            {sectors?.length ? <EChart option={bubbleOption(p, sectors, lang)} /> : <DataState />}
+            {sectors?.length ? <EChart option={bubbleOption(p, sectors, lang)} ariaLabel={zh ? "行业收益×广度连续渐变气泡：颜色为行业等权收益，大小为成交额" : "Sector return × breadth gradient bubbles: colour is EW return, size is turnover"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -637,14 +653,24 @@ export default function ChartLab() {
         <Card
           index="04"
           title={zh ? "个股收益分布 · 连续渐变柱" : "Return distribution · gradient bins"}
-          subtitle={zh ? "每根柱按自身收益取色 · 零轴 · 中位数参考" : "bin colour follows its return · zero line · median"}
+          subtitle={zh ? "每根柱按自身收益取色 · 零轴 · 中位数参考 · 只绘制 ±11% 区间内个股" : "bin colour follows its return · zero line · median · only stocks within ±11% are drawn"}
           right={<GradientKey p={p} left={zh ? "跌" : "down"} right={zh ? "涨" : "up"} />}
           padded={false}
           bodyClass="pt-0"
-          footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "端点箱包含区间外收益" : "tail bins include outliers"}</span><span className="r">{`${zh ? "样本" : "n ="} ${distribution?.stats.n ?? "—"}`}</span></div>}
+          footer={
+            <div className="provline">
+              <span>SOURCE <b>daily</b></span>
+              <span>{zh ? `±11% 外 ${num(distCov.omitted)} 只不绘制（仅计数）` : `${num(distCov.omitted)} stocks outside ±11% omitted (counted, not drawn)`}</span>
+              <span className="r">{`${zh ? "入箱" : "binned"} ${num(distCov.binned)} / ${zh ? "样本" : "n"} ${num(distCov.total)}${
+                distCov.excludedLt != null && distCov.excludedGt != null
+                  ? ` · ${zh ? "外" : "out"} <-11% ${num(distCov.excludedLt)} / >+11% ${num(distCov.excludedGt)}`
+                  : ""
+              }`}</span>
+            </div>
+          }
         >
           <div className={only === "distribution" ? "h-[560px] px-2 pb-2" : "h-[390px] px-2 pb-2"}>
-            {distribution?.bins.length ? <EChart option={distOption(p, distribution.bins, distribution.stats, lang)} /> : <DataState />}
+            {distribution?.bins?.length ? <EChart option={distOption(p, distribution.bins, distribution.stats, lang)} ariaLabel={zh ? "个股收益分布渐变柱状图：仅绘制 ±11% 区间内个股，区间外只计数" : "Stock return distribution: stocks within ±11% drawn, outside counted only"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -659,10 +685,10 @@ export default function ChartLab() {
           right={<GradientKey p={p} left={zh ? "跌" : "down"} right={zh ? "涨" : "up"} />}
           padded={false}
           bodyClass="pt-0"
-          footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "申万一级分组" : "SW L1 grouped"}</span><span className="r">{zh ? "点击色块可选行业" : "click to select"}</span></div>}
+          footer={<div className="provline"><span>SOURCE <b>daily</b></span><span>{zh ? "申万一级分组" : "SW L1 grouped"}</span><span className="r">{zh ? "悬停查看个股" : "hover a tile"}</span></div>}
         >
           <div className={only === "treemap" ? "h-[650px] px-2 pb-2" : "h-[470px] px-2 pb-2"}>
-            {stocks?.length ? <EChart option={treemapChart(p, stocks, lang)} /> : <DataState />}
+            {stocks?.length ? <EChart option={treemapChart(p, stocks, lang)} ariaLabel={zh ? "市场云图：面积表示成交额，颜色表示今日涨跌，展示成交额前 30 只" : "Market cloud: area shows turnover, colour shows today's return, top 30 stocks"} /> : <DataState />}
           </div>
         </Card>
       ),
@@ -673,7 +699,11 @@ export default function ChartLab() {
         <Card
           index="06"
           title={zh ? "行业月度收益 · 小倍数" : "Sector monthly paths · small multiples"}
-          subtitle={zh ? "每个行业一张小图 · 按 12M 累计排序 · 替代 12 条线叠加" : "one panel per sector · sorted by 12M · replaces 12-line overlay"}
+          subtitle={
+            zh
+              ? `每个行业一张小图 · 按 12M 累计排序 · 替代 12 条线叠加${monthNote?.partial && monthNote ? ` · 含当月至今（${monthNote.lastMonth} 仅 ${monthNote.nDays} 个交易日）` : ""}`
+              : `one panel per sector · sorted by 12M · replaces 12-line overlay${monthNote?.partial && monthNote ? ` · includes month-to-date (${monthNote.lastMonth}, ${monthNote.nDays} sessions so far)` : ""}`
+          }
           right={<span className="micro text-[var(--faint)]">{zh ? "领涨 / 落后" : "top / bottom"}</span>}
           padded={false}
           bodyClass="pt-0"
@@ -705,16 +735,42 @@ export default function ChartLab() {
     },
   ];
 
+  const known = only ? cards.find((c) => c.key === only) : undefined;
+
   return (
     <div className="flex flex-col gap-3.5">
       <PageHead
         kicker={`DEMO / ${zh ? "图表方向" : "Chart directions"} / ${meta?.last_trade_date ?? "—"}`}
         title={zh ? "把连续数据画成连续颜色" : "Continuous data, continuous colour"}
-        dek={zh ? "七个真实数据 Demo：渐变针线、渐变气泡、渐变分布、渐变云图、渐变状态云、六边形聚合、小倍数。" : "Six live-data demos: gradient lollipop, bubbles, distribution, cloud, regime and small multiples."}
+        dek={
+          zh
+            ? "七个真实数据 Demo：渐变针线、渐变气泡、渐变分布、渐变云图、渐变状态云、六边形聚合、小倍数（另有 ?demo=rotation 轮动云入口）。"
+            : "Seven live-data demos: gradient lollipop, bubbles, distribution, cloud, regime cloud, hexbin and small multiples (plus ?demo=rotation for the rotation cloud)."
+        }
         chips={<><span className="pill">A 渐变</span><span className="pill">B 小倍数</span><span className="pill">C 直接标注</span></>}
         right={<Link to="/" className="text-[12px] text-[var(--accent)] hover:underline">{zh ? "返回今日盘面 →" : "Back to Today →"}</Link>}
       />
-      {only ? cards.find((c) => c.key === only)?.node ?? <div className="text-[12px] text-[var(--muted)]">Unknown demo</div> : <div className="grid gap-3.5 xl:grid-cols-2">{cards.map((c) => <div key={c.key}>{c.node}</div>)}</div>}
+      {only ? (
+        known ? (
+          known.node
+        ) : (
+          <div className="card flex min-h-[220px] flex-col items-center justify-center gap-3 p-8 text-center">
+            <div className="kicker">DEMO</div>
+            <div className="serif text-[20px] font-bold text-[var(--text)]">{zh ? "未知的 Demo 参数" : "Unknown demo parameter"}</div>
+            <p className="max-w-[52ch] text-[12.5px] leading-relaxed text-[var(--muted)]">
+              {zh
+                ? `?demo=${only} 不是已注册的 Demo。可选：regime / regime-hex / tape / bubble / distribution / treemap / multiples / rotation。`
+                : `?demo=${only} is not a registered demo. Available: regime / regime-hex / tape / bubble / distribution / treemap / multiples / rotation.`}
+            </p>
+            <div className="flex items-center gap-3 text-[13px] font-medium text-[var(--accent)]">
+              <Link to="/labs" className="hover:underline">{zh ? "查看全部 Demo →" : "All demos →"}</Link>
+              <Link to="/" className="hover:underline">{zh ? "返回今日盘面 →" : "Back to Today →"}</Link>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="grid gap-3.5 xl:grid-cols-2">{cards.map((c) => <div key={c.key}>{c.node}</div>)}</div>
+      )}
     </div>
   );
 }

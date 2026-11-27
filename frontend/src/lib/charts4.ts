@@ -36,7 +36,7 @@ export function limitQualityChart(p: Palette, rows: LimitQuality[], lang: string
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${lang === "en" ? "Seal / float cap" : "封单 / 流通市值"}</span><b>${fd[i] == null ? "—" : fd[i] + "%"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${lang === "en" ? "Opened share" : "开板比例"}</span><b>${r.open_share == null ? "—" : (r.open_share * 100).toFixed(0) + "%"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${lang === "en" ? "Avg open times" : "平均开板次数"}</span><b>${r.avg_open_times?.toFixed(2) ?? "—"}</b></div>
-          <div style="display:flex;justify-content:space-between;gap:14px"><span>${lang === "en" ? "Limit-ups" : "涨停家数"}</span><b>${r.n_limit_up}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:14px"><span>${lang === "en" ? "Official limit-ups (excl. ST)" : "官方涨停家数（不含 ST）"}</span><b>${r.n_limit_up}</b></div>
         </div>`;
       },
     },
@@ -74,7 +74,14 @@ export function limitQualityChart(p: Palette, rows: LimitQuality[], lang: string
           symbol: "none",
           data: [{ yAxis: +median.toFixed(2) }],
           lineStyle: { color: p.axis, type: "dashed", width: 1 },
-          label: { show: false },
+          // 参考线语义标注（W6-16）：全窗口 fd_ratio 中位数
+          label: {
+            show: true,
+            formatter: lang === "en" ? "median" : "中位数",
+            color: p.muted,
+            fontSize: 11,
+            position: "end",
+          },
         },
       },
     ],

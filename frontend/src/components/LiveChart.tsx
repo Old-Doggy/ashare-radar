@@ -1,6 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
+import { prefersReducedMotion } from "../lib/theme";
 
 interface Props {
   className?: string;
@@ -20,11 +22,13 @@ export interface LiveChartHandle {
 /** 轮动图的宿主：不在 render 里 setOption，全部通过 ref 的 imperative 方法驱动。
  * - ResizeObserver → resize()（X12，保留播放位置由父组件 state 负责）；
  * - 卸载时 dispose（X14）；
- * - rAF 只存在于父组件，StrictMode 双挂载不会留下第二条动画（X13）。 */
+ * - rAF 只存在于父组件，StrictMode 双挂载不会留下第二条动画（X13）；
+ * - prefers-reduced-motion 时 resize 不做过渡动画（W14-16）。 */
 const LiveChart = forwardRef<LiveChartHandle, Props>(function LiveChart(
   { className, height = "100%", ariaLabel, onEvents },
   ref,
 ) {
+  const { i18n } = useTranslation();
   const hostRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<echarts.ECharts | null>(null);
 
@@ -36,7 +40,7 @@ const LiveChart = forwardRef<LiveChartHandle, Props>(function LiveChart(
     });
     instRef.current = inst;
     const ro = new ResizeObserver(() => {
-      if (!inst.isDisposed()) inst.resize();
+      if (!inst.isDisposed()) inst.resize({ animation: { duration: prefersReducedMotion() ? 0 : 180 } });
     });
     ro.observe(hostRef.current);
     return () => {
@@ -79,19 +83,20 @@ const LiveChart = forwardRef<LiveChartHandle, Props>(function LiveChart(
       },
       resize: () => {
         const inst = instRef.current;
-        if (inst && !inst.isDisposed()) inst.resize();
+        if (inst && !inst.isDisposed()) inst.resize({ animation: { duration: prefersReducedMotion() ? 0 : 180 } });
       },
     }),
     [],
   );
 
+  const fallbackLabel = i18n.language === "en" ? "Chart" : "图表";
   return (
     <div
       ref={hostRef}
       className={className}
       style={{ height, width: "100%" }}
       role="img"
-      aria-label={ariaLabel}
+      aria-label={ariaLabel || fallbackLabel}
     />
   );
 });

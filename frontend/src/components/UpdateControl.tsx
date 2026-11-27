@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, CheckCircle2, CloudDownload, Loader2, X } from "lucide-react";
-import { api, isStatic, type UpdateJob } from "../lib/api";
+import { api, ApiError, isStatic, type UpdateJob } from "../lib/api";
 
 const IDLE: UpdateJob = {
   id: null,
@@ -87,13 +87,20 @@ export function UpdateControl() {
       const next = await api.startUpdate();
       setJob(next);
       if (timer.current == null) timer.current = window.setInterval(poll, 900);
-    } catch {
-      setJob({
-        ...IDLE,
-        state: "failed",
-        message: zh ? "无法连接更新服务，请确认后端已启动" : "Could not reach the update service",
-      });
-      setVisible(true);
+    } catch (error) {
+      // 409 = 已有更新在跑（后端并发保护）。此时不是失败，直接进入轮询。
+      if (error instanceof ApiError && error.status === 409) {
+        setVisible(true);
+        api.updateStatus().then((next) => setJob(next)).catch(() => setJob({ ...IDLE, state: "running" }));
+        if (timer.current == null) timer.current = window.setInterval(poll, 900);
+      } else {
+        setJob({
+          ...IDLE,
+          state: "failed",
+          message: zh ? "无法连接更新服务，请确认后端已启动" : "Could not reach the update service",
+        });
+        setVisible(true);
+      }
     } finally {
       setStarting(false);
     }
@@ -141,7 +148,7 @@ export function UpdateControl() {
                       ? zh ? "数据拉取失败" : "Update failed"
                       : zh ? "正在拉取今日数据" : "Fetching today's data"}
                 </span>
-                <button onClick={() => setVisible(false)} className="text-[var(--faint)] hover:text-[var(--text)]" aria-label="close">
+                <button onClick={() => setVisible(false)} className="text-[var(--faint)] hover:text-[var(--text)]" aria-label={zh ? "关闭" : "Close"}>
                   <X size={12} />
                 </button>
               </div>

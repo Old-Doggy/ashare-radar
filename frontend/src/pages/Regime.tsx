@@ -1,18 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api, type MarketDay } from "../lib/api";
 import { useUI } from "../store/ui";
 import { paletteFor } from "../lib/theme";
-import { money, pct, ratio, shortDate, trendClass } from "../lib/format";
-import { regimeScatter, regimeColor } from "../lib/charts2";
-import { regimeLabel, regimeOf, type RegimeKey } from "../lib/regime";
+import { money, pct, ratio, trendClass } from "../lib/format";
+import { regimeScatter, regimeColor, regimeLegendGradient } from "../lib/charts2";
+import { regimeLabel, regimeOf, similarDateLabel, type RegimeKey } from "../lib/regime";
 import { DataState } from "../components/DataState";
 import EChart from "../components/EChart";
 import { Card, MicroLabel } from "../components/Card";
 import { PageHead } from "../components/PageHead";
 import { Segmented } from "../components/Segmented";
+import { pickRange } from "../lib/viewMetrics";
 
 const RANGES = [
   { value: "1Y", label: "1Y", n: 250 },
@@ -20,6 +21,7 @@ const RANGES = [
   { value: "ALL", label: "ALL", n: 99999 },
 ] as const;
 type RangeKey = (typeof RANGES)[number]["value"];
+const RANGE_KEYS = RANGES.map((r) => r.value) as RangeKey[];
 
 const KEYS: RegimeKey[] = ["broad_up", "concentrated_up", "mixed", "broad_down", "unknown"];
 
@@ -36,7 +38,16 @@ export default function Regime() {
   const { theme, colorblind } = useUI();
   const p = paletteFor(theme, colorblind);
   const [params, setParams] = useSearchParams();
-  const range = (params.get("range") as RangeKey) || "3Y";
+  const rawRange = params.get("range");
+  // 非法 range 回退默认区间并修正 URL（W7-11）
+  const range = pickRange<RangeKey>(rawRange, RANGE_KEYS, "3Y");
+  useEffect(() => {
+    if (rawRange != null && rawRange !== range) {
+      const next = new URLSearchParams(params);
+      next.set("range", range);
+      setParams(next, { replace: true });
+    }
+  }, [rawRange, range, params, setParams]);
   const setRange = (r: RangeKey) => {
     const p = new URLSearchParams(params);
     p.set("range", r);
@@ -92,7 +103,8 @@ export default function Regime() {
       const a = agg.get(k)!;
       return {
         k,
-        avgDur: ds.length ? ds.reduce((x, y) => x + y, 0) / ds.length : 0,
+        // 该状态在区间内从未出现时"平均持续"应为未知而不是 0 天（W7-09）
+        avgDur: ds.length ? ds.reduce((x, y) => x + y, 0) / ds.length : null,
         fwd5: a.c5 ? a.s5 / a.c5 : null,
         fwd20: a.c20 ? a.s20 / a.c20 : null,
       };
@@ -134,8 +146,8 @@ export default function Regime() {
         title={zh ? "收益 × 广度：状态云" : "Return × breadth: state cloud"}
         dek={
           zh
-            ? "颜色随等权收益连续渐变：绿 → 沙 → 红；横轴 0%、纵轴 50% 分四象限，点大小 = 成交额，虚线 = 最近 30 日"
-            : "continuous green → sand → red by EW return; split at 0% / 50%, size = turnover, dashed = last 30 sessions"
+            ? "颜色随等权收益连续渐变：跌 → 沙 → 涨；横轴 0%、纵轴 50% 分四象限，点大小 = 成交额，虚线 = 最近 30 日"
+            : "continuous down → sand → up by EW return; split at 0% / 50%, size = turnover, dashed = last 30 sessions"
         }
         chips={
           <>
@@ -161,9 +173,10 @@ export default function Regime() {
             right={
               <div className="flex items-center gap-2.5">
                 <div className="hidden items-center gap-1.5 md:flex">
-                  <span className="micro">跌</span>
-                  <span className="h-[6px] w-20 rounded-full" style={{ background: `linear-gradient(90deg, ${p.down}, ${p.bg === "#f6f2e8" ? "#a8864a" : "#a67f3f"}, ${p.up})` }} />
-                  <span className="micro">涨</span>
+                  <span className="micro">{zh ? "跌" : "down"}</span>
+                  {/* 图例渐变与散点 tone 同一曲线采样，0% 处为沙色（W6-14） */}
+                  <span className="h-[6px] w-20 rounded-full" style={{ background: regimeLegendGradient(p) }} />
+                  <span className="micro">{zh ? "涨" : "up"}</span>
                 </div>
                 {selRow && (
                   <div className="flex items-center gap-2">
@@ -179,7 +192,7 @@ export default function Regime() {
             <div className="h-[500px] px-1 pb-1 md:h-[520px]">
               <EChart
                 option={regimeScatter(p, rows, selected, lang)}
-                ariaLabel="收益与广度的状态散点图，含四象限与近 30 日轨迹"
+                ariaLabel={zh ? "收益与广度的状态散点图，含四象限与近 30 日轨迹" : "Return vs breadth regime scatter with quadrants and the last 30-session trail"}
                 onEvents={{
                   click: (params: unknown) => {
                     const d = (params as { data?: { trade_date?: string } })?.data?.trade_date;
@@ -230,16 +243,17 @@ export default function Regime() {
                   <div key={k}>
                     <div className="flex items-center justify-between">
                       <span className="flex items-center gap-2 text-[12.5px] text-[var(--text-2)]">
-                        <span className="h-[7px] w-[7px] rounded-full" style={{ background: regimeColor(k) }} />
+                        <span className="h-[7px] w-[7px] rounded-full" style={{ background: regimeColor(k, p) }} />
                         {regimeLabel(k, lang)}
                       </span>
                       <span className="mono text-[12.5px] text-[var(--text)]">
                         {n}
-                        <span className="ml-1 text-[11px] text-[var(--muted)]">{ratio(share, 0)}</span>
+                        {/* 份额保留 1 位小数，避免逐项 0 位取整合计 101%（W7-09） */}
+                        <span className="ml-1 text-[11px] text-[var(--muted)]">{ratio(share, 1)}</span>
                       </span>
                     </div>
                     <div className="mt-1.5 h-[3px] w-full rounded-full bg-[var(--panel-3)]">
-                      <div className="h-full rounded-full" style={{ width: `${share * 100}%`, background: regimeColor(k), opacity: 0.75 }} />
+                      <div className="h-full rounded-full" style={{ width: `${share * 100}%`, background: regimeColor(k, p), opacity: 0.75 }} />
                     </div>
                   </div>
                 );
@@ -256,10 +270,10 @@ export default function Regime() {
               {regimeStats.map((s) => (
                 <div key={s.k} className="grid grid-cols-[1fr_42px_50px_54px] items-center py-[3px] text-[11.5px]">
                   <span className="flex items-center gap-1.5 text-[var(--text-2)]">
-                    <span className="h-[5px] w-[5px] rounded-full" style={{ background: regimeColor(s.k) }} />
+                    <span className="h-[5px] w-[5px] rounded-full" style={{ background: regimeColor(s.k, p) }} />
                     {regimeLabel(s.k, lang)}
                   </span>
-                  <span className="mono text-right text-[var(--muted)]">{s.avgDur.toFixed(1)}d</span>
+                  <span className="mono text-right text-[var(--muted)]">{s.avgDur == null ? "—" : `${s.avgDur.toFixed(1)}d`}</span>
                   <span className={`mono text-right ${trendClass(s.fwd5)}`}>{s.fwd5 == null ? "—" : pct(s.fwd5)}</span>
                   <span className={`mono text-right ${trendClass(s.fwd20)}`}>{s.fwd20 == null ? "—" : pct(s.fwd20)}</span>
                 </div>
@@ -286,7 +300,8 @@ export default function Regime() {
                   onClick={() => setSel(r.trade_date)}
                   className="flex items-center gap-2 rounded-md px-2 py-[7px] text-left transition-colors hover:bg-[var(--panel-2)]"
                 >
-                  <span className="mono w-[58px] text-[12px] text-[var(--text-2)]">{shortDate(r.trade_date)}</span>
+                  {/* 显示年份，避免跨年后两条相同的 "11/26"（W7-08） */}
+                  <span className="mono w-[74px] text-[11.5px] text-[var(--text-2)]">{similarDateLabel(r.trade_date)}</span>
                   <span className={`mono w-[46px] text-[11.5px] ${r.ew_ret >= 0 ? "up" : "down"}`}>{pct(r.ew_ret)}</span>
                   <span className="mono w-[38px] text-[11.5px] text-[var(--muted)]">{ratio(r.breadth, 0)}</span>
                   <span className="ml-auto mono text-[11px] text-[var(--faint)]">d={d.toFixed(2)}</span>

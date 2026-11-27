@@ -7,7 +7,7 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState }
 import { useTranslation } from "react-i18next";
 import type { SectorRollDay } from "../lib/api";
 import type { Palette } from "../lib/theme";
-import { bounds, coordAt, leadingIndices, sampleTrail, smoothMatrix, toMatrix, type Matrix } from "../lib/rotation";
+import { bounds, coordAt, initialSmoothHalfLife, leaderRetTone, leadingIndices, sampleTrail, smoothMatrix, toMatrix, type Matrix } from "../lib/rotation";
 import { rotationBase, rotationFrame, type RotationBubble, type RotationFrameData } from "../lib/charts6";
 import LiveChart, { type LiveChartHandle } from "./LiveChart";
 import { PlaybackBar, type PlaybackGroup } from "./PlaybackBar";
@@ -83,8 +83,9 @@ export const RotationPanel = forwardRef<RotationPanelHandle, Props>(function Rot
 
   const [rollW, setRollW] = useState<RollW>(10);
   const [winLen, setWinLen] = useState<WinW>(30);
-  // X5：prefers-reduced-motion 命中时初始平滑更狠（强=12），降低视觉运动量。
-  const [smoothHalf, setSmoothHalf] = useState<number>(reduceMotion ? 12 : 20);
+  // W8-04：prefers-reduced-motion 命中时初始平滑取最强档（32），降低帧间运动量；
+  // 原实现取 12 反而比默认 20 更弱（帧间运动更大）。用户仍可在控制条手动调整。
+  const [smoothHalf, setSmoothHalf] = useState<number>(() => initialSmoothHalfLife(reduceMotion));
   const [tailLen, setTailLen] = useState<number>(9999);
   const [labelTop, setLabelTop] = useState<number>(18);
   const [speed, setSpeed] = useState<number>(1);
@@ -349,6 +350,9 @@ export const RotationPanel = forwardRef<RotationPanelHandle, Props>(function Rot
   const leaders = leadingIndices(frameData.bubbles.map((bubble) => bubble.rank)).map((i) => frameData.bubbles[i]);
   const leader = leaders[0];
   const leaderNames = leaders.map((bubble) => bubble.name).join(zh ? "、" : ", ");
+  const leaderTone = leader ? leaderRetTone(leader.ret) : "flat";
+  const leaderToneClass =
+    leaderTone === "up" ? "text-[var(--up)]" : leaderTone === "down" ? "text-[var(--down)]" : "text-[var(--muted)]";
 
   return (
     <div
@@ -372,7 +376,8 @@ export const RotationPanel = forwardRef<RotationPanelHandle, Props>(function Rot
           {leader ? (
             <>
               {t(leaders.length > 1 ? "rotate.tiedLeading" : "rotate.leading")} <b className="text-[var(--text)]">{leaderNames}</b>{" "}
-              <span className={`mono ${(leader.ret ?? 0) >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>{pct(leader.ret)}</span>{" "}
+              {/* CR2-03：收益未知时保持未知语义（中性色），不再按 0 染成上涨色 */}
+              <span className={`mono ${leaderToneClass}`}>{pct(leader.ret)}</span>{" "}
               <span className="mono text-[var(--faint)]">#{leader.rank}</span>
             </>
           ) : (

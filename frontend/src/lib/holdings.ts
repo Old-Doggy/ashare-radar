@@ -64,4 +64,61 @@ export function parseWatchCsv(text: string): {ts_code: string; shares: number; c
 
 export const escapeHtml = (v: unknown): string => String(v ?? "").replace(/[&<>"']/g,
   c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
-export const signedMoney = (v: number): string => `${v < 0 ? '−' : '+'}¥${Math.abs(v).toLocaleString('en-US')}`;
+
+/** 带符号金额。非有限值保持未知（W5-10：NaN/Infinity 不再显示 "+¥NaN"/"+¥∞"）。 */
+export const signedMoney = (v: number): string => {
+  if (!Number.isFinite(v)) return "—";
+  return `${v < 0 ? '−' : '+'}¥${Math.abs(v).toLocaleString('en-US')}`;
+};
+
+/** 先按**未舍入**原始值定符号、再四舍五入显示（W6-07 负零）。
+ *  (-0.5, 0) 元不再舍入成 -0 后被当成上涨：符号取原始值，显示 −¥0。 */
+export const signedMoneyRounded = (v: number): string => {
+  if (!Number.isFinite(v)) return "—";
+  const sign = v < 0 ? '−' : '+';
+  return `${sign}¥${Math.round(Math.abs(v)).toLocaleString('en-US')}`;
+};
+
+/** 涨跌方向（图表着色用）。非有限/缺值 → flat；-0 按原始值判号。 */
+export const signedTone = (v: number | null | undefined): "up" | "down" | "flat" => {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "flat";
+  if (v > 0) return "up";
+  if (v < 0 || Object.is(v, -0)) return "down";
+  return "flat";
+};
+
+/** 自选行的报价状态：missing=股票池外/无任何行情，stale=只有过期报价（W9-17/W5-12）。 */
+export interface QuoteStateRow {
+  ts_code: string;
+  is_stale?: boolean;
+  quote_missing?: boolean;
+  quote_date?: string | null;
+}
+
+export function quoteState(row: QuoteStateRow): "missing" | "stale" | "ok" {
+  if (row.quote_missing) return "missing";
+  if (row.is_stale) return "stale";
+  return "ok";
+}
+
+/** 把自选行拆成「未收录/无行情」与「报价过期」两类，供 banner 分别提示。 */
+export function watchQuoteIssues(rows: readonly QuoteStateRow[]): { missing: string[]; stale: string[] } {
+  const missing: string[] = [];
+  const stale: string[] = [];
+  for (const row of rows) {
+    const state = quoteState(row);
+    if (state === "missing") missing.push(row.ts_code);
+    else if (state === "stale") stale.push(row.ts_code);
+  }
+  return { missing, stale };
+}
+
+/** CSV 导入池校验（W9-19）：返回不在股票池内的代码；未提供股票池时不做判断。
+ *  只用于提示，不阻止导入。 */
+export function unknownWatchCodes(
+  codes: readonly string[],
+  universe: ReadonlySet<string> | null | undefined,
+): string[] {
+  if (!universe || !universe.size) return [];
+  return codes.filter((code) => !universe.has(code));
+}

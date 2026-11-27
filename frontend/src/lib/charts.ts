@@ -49,7 +49,8 @@ export const pointerDateLabel = { formatter: (params: { value?: unknown }) => ax
 
 /**
  * inside（滚轮 / 双指缩放 + 拖拽平移）+ slider（底部缩略滑杆）联动。
- * points 为该 x 轴的类目数量，用来限制最小缩放跨度（至少约 12 个交易日）。
+ * points 为该 x 轴的类目数量，用来限制最小缩放跨度：至少约 12 个交易日。
+ * 下限取 0.4%，超长序列（ALL 约 2400 点）也保持 ≈12 日而不是被 0.8% 放宽到 ~19 日。
  */
 export function timeZoom(
   p: Palette,
@@ -57,7 +58,7 @@ export function timeZoom(
   xAxisIndex: number | number[],
   zoom: TimeZoom = {},
 ): NonNullable<EChartsOption["dataZoom"]> {
-  const minSpan = Math.min(90, Math.max(0.8, (12 / Math.max(1, points)) * 100));
+  const minSpan = Math.min(90, Math.max(0.4, (12 / Math.max(1, points)) * 100));
   const sliderStyle = {
     backgroundColor: p.panel2,
     borderColor: p.border,
@@ -113,7 +114,12 @@ export function timeZoom(
   ];
 }
 
-/** 参与广度：近 N 日 breadth 面积 + 背离点 */
+/**
+ * 参与广度：近 N 日 breadth 面积 + 背离点。
+ *
+ * 注意：当前没有页面消费本函数（Today/Market 用 returnBreadth 的双面板），
+ * 仅被回归测试当作纯函数契约使用；保留是为了避免删除测试覆盖过的历史行为。
+ */
 export function breadthArea(p: Palette, rows: MarketDay[]): EChartsOption {
   const x = axisDate(rows);
   const y = rows.map((r) => r.breadth == null ? null : +(r.breadth * 100).toFixed(1));
@@ -215,9 +221,8 @@ export function returnBreadth(p: Palette, rows: MarketDay[], lang: string, zoom?
         const r = rowByDate(rows, params, "trade_date");
         if (!r) return "";
         const breadth = r.breadth == null ? "—" : `${(r.breadth * 100).toFixed(1)}%`;
-        const t = (k: string) => k;
         return `<div style="min-width:188px">
-          <div style="font-family:'JetBrains Mono Variable',monospace;font-size:12px;color:${p.muted};margin-bottom:6px">${escapeHtml(r.trade_date)} · ${t(regimeLabel(regimeOf(r), lang))}</div>
+          <div style="font-family:'JetBrains Mono Variable',monospace;font-size:12px;color:${p.muted};margin-bottom:6px">${escapeHtml(r.trade_date)} · ${regimeLabel(regimeOf(r), lang)}</div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "等权收益", "Equal-weight")}</span><b style="color:${r.ew_ret >= 0 ? p.up : p.down}">${(r.ew_ret * 100).toFixed(2)}%</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "沪深300", "CSI 300")}</span><b>${r.hs300_ret === null ? "—" : (r.hs300_ret * 100).toFixed(2) + "%"}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth}</b></div>
@@ -355,11 +360,11 @@ export function sectorBubble(p: Palette, sectors: SectorDay[], lang: string, sel
     selected,
   ].filter(Boolean) as string[]);
 
+  // 象限色与 regime.ts / metric_contracts 一致：ew_ret <= 0 归左半，
+  // ew_ret == 0 且 breadth < 0.5 是"普跌"而不是"结构分化"（W6-05；与 charts6 同口径）。
   const quadColor = (s: SectorDay) => {
-    if (s.ew_ret > 0 && s.breadth >= 0.5) return p.up;
-    if (s.ew_ret > 0 && s.breadth < 0.5) return p.copper;
-    if (s.ew_ret < 0 && s.breadth < 0.5) return p.down;
-    return p.muted;
+    if (s.ew_ret > 0) return s.breadth >= 0.5 ? p.up : p.copper;
+    return s.breadth >= 0.5 ? p.muted : p.down;
   };
 
   const pts = sectors.filter((s) => s.breadth != null && Number.isFinite(s.breadth)).map((s) => {
@@ -403,7 +408,7 @@ export function sectorBubble(p: Palette, sectors: SectorDay[], lang: string, sel
         return `<div style="min-width:158px">
           <div style="font-weight:600;margin-bottom:6px">${escapeHtml(q.data.name)}</div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "行业收益", "Return")}</span><b style="color:${ret >= 0 ? p.up : p.down}">${ret.toFixed(2)}%</b></div>
-          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth.toFixed(0)}%</b></div>
+          <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "上涨占比", "Breadth")}</span><b>${breadth.toFixed(1)}%</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "内部分化", "IQR")}</span><b>${iqr.toFixed(2)}pp</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "成交额", "Turnover")}</span><b>${money(amt, lang)}</b></div>
           <div style="display:flex;justify-content:space-between;gap:14px"><span>${L(lang, "成分股", "Constituents")}</span><b>${n}</b></div>
@@ -429,7 +434,9 @@ export function sectorBubble(p: Palette, sectors: SectorDay[], lang: string, sel
         type: "scatter",
         data: pts,
         cursor: "pointer",
-        symbolSize: (val: number[]) => 8 + Math.sqrt((val[2] || 0) / maxAmt) * 24,
+        // 面积与成交额严格成比例：直径 = 28 × sqrt(amt / maxAmt)，不再加常数项（W6-08），
+        // 极小成交额的气泡用透明度而不是加性尺寸放大。
+        symbolSize: (val: number[]) => 28 * Math.sqrt((val[2] || 0) / maxAmt),
         itemStyle: { opacity: 0.82, borderColor: p.panel, borderWidth: 1 },
         emphasis: { itemStyle: { opacity: 1, borderColor: p.text, borderWidth: 1 }, scale: 1.12 },
         label: {
@@ -550,11 +557,6 @@ export function distributionChart(
             fontSize: 11,
             position: "end",
           },
-        },
-        markArea: {
-          silent: true,
-          itemStyle: { color: "transparent" },
-          data: [[{ xAxis: 0 }, { xAxis: 11 }]],
         },
       },
     ],

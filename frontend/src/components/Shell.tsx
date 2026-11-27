@@ -1,5 +1,5 @@
-import { quoteAgeDays } from "../lib/viewMetrics";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { staleBanner, staleBannerText } from "../lib/viewMetrics";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -20,9 +20,8 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import { setFmtLang } from "../lib/format";
 import { useUI } from "../store/ui";
 import { useTranslation } from "react-i18next";
 import { CommandPalette } from "./CommandPalette";
@@ -57,6 +56,18 @@ const MORE = [
   { to: "/watchlist", key: "watchlist", icon: Star },
   { to: "/about", key: "about", icon: Info },
 ] as const;
+
+/** 命令面板里 G 开头的页面跳转键（与 CommandPalette 的 hint 一一对应，W7-07）。 */
+const LEADER_ROUTES: Record<string, string> = {
+  t: "/",
+  m: "/market",
+  r: "/regime",
+  s: "/sectors",
+  k: "/stocks",
+  e: "/sentiment",
+  w: "/watchlist",
+  a: "/about",
+};
 
 function Logo({ size = 32 }: { size?: number }) {
   return (
@@ -97,62 +108,129 @@ function RailButton({ to, label, icon: Icon }: { to: string; label: string; icon
   );
 }
 
+/** 只删除 URL 上的一次性参数（?cmd=1 消费后即删，刷新不再弹面板；W5-06）。 */
+function stripQueryParam(key: string) {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(key)) return;
+    url.searchParams.delete(key);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    /* 忽略：某些测试环境没有 history */
+  }
+}
+
 export default function Shell() {
   const { t, i18n } = useTranslation();
   const { theme, toggleTheme, colorblind, toggleColorblind, setLang } = useUI();
   const qc = useQueryClient();
   const location = useLocation();
+  const navigate = useNavigate();
   const [spin, setSpin] = useState(false);
-  const [cmdk, setCmdk] = useState(new URLSearchParams(window.location.search).get("cmd") === "1");
+  const [cmdk, setCmdk] = useState(() => new URLSearchParams(window.location.search).get("cmd") === "1");
   const [more, setMore] = useState(false);
 
   const { data: meta, isError } = useQuery({ queryKey: ["meta"], queryFn: api.meta, staleTime: 60_000 });
 
   const active = NAV.find((n) => (n.to === "/" ? location.pathname === "/" : location.pathname.startsWith(n.to)));
-  const title = active
-    ? t(`nav.${active.key}`)
-    : location.pathname.startsWith("/about")
-      ? t("nav.about")
-      : "";
+  // briefing / labs 不在主导航里，但也有页面名；否则标签页/历史记录只显示“· A股雷达”（W14-08）。
+  const title = useMemo(() => {
+    if (active) return t(`nav.${active.key}`);
+    if (location.pathname.startsWith("/about")) return t("nav.about");
+    if (location.pathname.startsWith("/briefing")) return t("nav.briefing");
+    if (location.pathname.startsWith("/labs")) return t("nav.labs");
+    return i18n.language === "en" ? "Page not found" : "页面不存在";
+  }, [active, location.pathname, t, i18n.language]);
   const moreActive = MORE.some((n) => location.pathname.startsWith(n.to));
 
   useEffect(() => {
     document.title = `${title} · ${i18n.language === "zh" ? "A股雷达" : "Ashare Radar"}`;
-  }, [title]);
+  }, [title, i18n.language]);
 
   useEffect(() => {
-    setFmtLang(i18n.language);
-  }, [i18n.language]);
+    if (new URLSearchParams(window.location.search).get("cmd") === "1") stripQueryParam("cmd");
+  }, []);
+
+  const refresh = useCallback(() => {
+    setSpin(true);
+    qc.invalidateQueries();
+    window.setTimeout(() => setSpin(false), 700);
+  }, [qc]);
 
   useEffect(() => {
+    let leader = false;
+    let leaderTimer: number | null = null;
+    const clearLeader = () => {
+      leader = false;
+      if (leaderTimer != null) {
+        window.clearTimeout(leaderTimer);
+        leaderTimer = null;
+      }
+    };
+    const typing = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      return !!el && typeof el.closest === "function" && !!el.closest("input, textarea, select, [contenteditable='true']");
+    };
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setCmdk((v) => !v);
+        return;
+      }
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === "t") {
+          e.preventDefault();
+          toggleTheme();
+        } else if (key === "i") {
+          e.preventDefault();
+          setLang(i18n.language === "zh" ? "en" : "zh");
+        } else if (key === "b") {
+          e.preventDefault();
+          toggleColorblind();
+        } else if (key === "r") {
+          e.preventDefault();
+          refresh();
+        }
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (typing(e.target)) return;
+      const key = e.key.toLowerCase();
+      if (leader) {
+        clearLeader();
+        const to = LEADER_ROUTES[key];
+        if (to) {
+          e.preventDefault();
+          navigate(to);
+        }
+        return;
+      }
+      if (key === "g") {
+        leader = true;
+        leaderTimer = window.setTimeout(clearLeader, 1200);
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (leaderTimer != null) window.clearTimeout(leaderTimer);
+    };
+  }, [navigate, toggleTheme, setLang, toggleColorblind, refresh, i18n.language]);
 
   useEffect(() => {
     setMore(false);
   }, [location.pathname]);
 
-  const refresh = () => {
-    setSpin(true);
-    qc.invalidateQueries();
-    window.setTimeout(() => setSpin(false), 700);
-  };
-
   const statusColor = isError ? "var(--warn)" : meta?.status === "ok" ? "var(--down)" : "var(--warn)";
 
-  const stale = useMemo(() => {
-    if (!meta?.last_trade_date) return null;
-    const days = quoteAgeDays(meta.last_trade_date);
-    if (days < 1) return null;
-    return { days };
-  }, [meta?.last_trade_date]);
+  // W5-05：周末/节假日读上一交易日不再每天误报；工作日过了更新窗口才提示“今日未更新”。
+  const banner = useMemo(
+    () => (meta?.last_trade_date ? staleBanner(meta.last_trade_date) : null),
+    [meta?.last_trade_date],
+  );
+  const bannerText =
+    banner && meta?.last_trade_date ? staleBannerText(banner, meta.last_trade_date, i18n.language) : null;
 
   const printMode = location.pathname.startsWith("/briefing");
   if (printMode) {
@@ -164,7 +242,10 @@ export default function Shell() {
   }
 
   const time = meta?.updated_at
-    ? new Date(meta.updated_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    ? new Date(meta.updated_at).toLocaleTimeString(i18n.language === "en" ? "en-US" : "zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
     : "—";
 
   return (
@@ -181,6 +262,7 @@ export default function Shell() {
         <div className="flex flex-col items-center gap-2">
           <NavLink
             to="/about"
+            aria-label={t("nav.about")}
             className={({ isActive }) =>
               `grid h-8 w-8 place-items-center rounded-lg transition-colors ${
                 isActive ? "bg-[var(--surface-2)] text-[var(--text)]" : "text-[var(--faint)] hover:text-[var(--text-2)]"
@@ -207,17 +289,17 @@ export default function Shell() {
           <button
             onClick={() => setCmdk(true)}
             className="ml-auto hidden h-[34px] w-[320px] items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[12px] text-[var(--faint)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--muted)] md:flex"
-            aria-label={i18n.language === "zh" ? "打开命令面板" : "Open command palette"}
+            aria-label={t("common.openCommand")}
           >
             <Search size={15} />
-            <span className="truncate">{i18n.language === "zh" ? "搜索股票、行业或页面" : "Search stocks, sectors, metrics"}</span>
+            <span className="truncate">{t("common.searchHint")}</span>
             <kbd className="ml-auto rounded border border-[var(--border-strong)] px-1 py-[1px] font-mono text-[11px]">⌘K</kbd>
           </button>
 
           <button
             onClick={() => setCmdk(true)}
             className="ml-auto grid h-[34px] w-[34px] place-items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] md:hidden"
-            aria-label="Command"
+            aria-label={t("common.command")}
           >
             <Search size={15} />
           </button>
@@ -239,8 +321,8 @@ export default function Shell() {
             target="_blank"
             rel="noreferrer"
             className="hidden h-[34px] w-[34px] place-items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] transition-colors hover:text-[var(--text)] sm:grid"
-            title={i18n.language === "zh" ? "每日简报" : "Daily briefing"}
-            aria-label={i18n.language === "zh" ? "每日简报" : "Daily briefing"}
+            title={t("nav.briefing")}
+            aria-label={t("nav.briefing")}
           >
             <FileText size={15} />
           </a>
@@ -258,6 +340,7 @@ export default function Shell() {
             onClick={() => setLang(i18n.language === "zh" ? "en" : "zh")}
             className="hidden h-[34px] items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 font-mono text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--text)] sm:flex"
             title={t("common.lang")}
+            aria-label={t("common.lang")}
           >
             <Languages size={15} />
             {i18n.language === "zh" ? "中" : "EN"}
@@ -266,7 +349,8 @@ export default function Shell() {
           <button
             onClick={toggleColorblind}
             className="hidden h-[34px] w-[34px] place-items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] transition-colors hover:text-[var(--text)] sm:grid"
-            title={i18n.language === "en" ? (colorblind ? "Default palette" : "Colorblind palette (blue/orange)") : (colorblind ? "多色（默认）" : "色盲友好（蓝/橙）")}
+            title={t("common.colorblindOn")}
+            aria-label={t("common.colorblind")}
             aria-pressed={colorblind}
           >
             <Palette size={15} className={colorblind ? "text-[var(--accent)]" : ""} />
@@ -305,14 +389,10 @@ export default function Shell() {
           </div>
         )}
 
-        {stale && (
+        {bannerText && (
           <div className="no-print flex items-center gap-2 border-b border-[var(--warn)]/25 bg-[var(--warn-soft)] px-3 py-1.5 text-[11.5px] text-[var(--warn)] md:px-5">
             <span className="inline-block h-[5px] w-[5px] shrink-0 rounded-full bg-[var(--warn)]" />
-            <span className="truncate">
-              {i18n.language === "en"
-                ? `Latest observation: ${meta?.last_trade_date} (${stale.days} calendar days ago); holidays may explain the gap. Refresh to check.`
-                : `最新数据 ${meta?.last_trade_date}，距今 ${stale.days} 个自然日；可能包含休市日，可刷新确认。`}
-            </span>
+            <span className="truncate">{bannerText}</span>
           </div>
         )}
 
@@ -363,9 +443,10 @@ export default function Shell() {
               more || moreActive ? "text-[var(--text)]" : "text-[var(--faint)]"
             }`}
             aria-expanded={more}
+            aria-label={t("common.more")}
           >
             {more ? <X size={18} /> : <MoreHorizontal size={18} />}
-            <span className="text-[11px] leading-none">{i18n.language === "zh" ? "更多" : "More"}</span>
+            <span className="text-[11px] leading-none">{t("common.more")}</span>
           </button>
         </div>
       </nav>
@@ -378,8 +459,8 @@ export default function Shell() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between">
-              <span className="micro">{i18n.language === "zh" ? "更多页面" : "More"}</span>
-              <button onClick={() => setMore(false)} className="text-[var(--faint)]" aria-label="Close">
+              <span className="micro">{t("common.morePages")}</span>
+              <button onClick={() => setMore(false)} className="text-[var(--faint)]" aria-label={t("common.close")}>
                 <X size={16} />
               </button>
             </div>
@@ -401,22 +482,23 @@ export default function Shell() {
             <div className="mt-3 flex items-center gap-2">
               <button
                 onClick={toggleTheme}
-                className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[11px] text-[var(--text-2)]"
+                className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[11.5px] text-[var(--text-2)]"
               >
                 {theme === "dark" ? <Sun size={12} /> : <Moon size={12} />}
-                {theme === "dark" ? "浅色" : "深色"}
+                {theme === "dark" ? t("common.themeLight") : t("common.themeDark")}
               </button>
               <button
                 onClick={() => setLang(i18n.language === "zh" ? "en" : "zh")}
-                className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[11px] text-[var(--text-2)]"
+                className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[11.5px] text-[var(--text-2)]"
               >
                 <Languages size={12} />
                 {i18n.language === "zh" ? "EN" : "中文"}
               </button>
               <button
                 onClick={toggleColorblind}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--text-2)]"
-                aria-label="Colorblind"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--text-2)]"
+                aria-label={t("common.colorblind")}
+                aria-pressed={colorblind}
               >
                 <Palette size={15} className={colorblind ? "text-[var(--accent)]" : ""} />
               </button>

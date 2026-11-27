@@ -5,14 +5,14 @@ import { useTranslation } from "react-i18next";
 import { api } from "../lib/api";
 import { useUI } from "../store/ui";
 import { paletteFor } from "../lib/theme";
-import { money, pct, ratio, shortDate, trendClass } from "../lib/format";
+import { money, num, pct, ratio, shortDate, trendClass } from "../lib/format";
 import { returnBreadth } from "../lib/charts";
 import { concentrationChart, dispersionChart } from "../lib/charts2";
 import ZoomChart, { type ZoomChartHandle } from "../components/ZoomChart";
 import { Card } from "../components/Card";
 import { PageHead } from "../components/PageHead";
 import { DataState } from "../components/DataState";
-import { median } from "../lib/viewMetrics";
+import { coverageGaps, cumulativeReturn, displaySource, median, mostConcentratedDay, pickRange } from "../lib/viewMetrics";
 import { Segmented } from "../components/Segmented";
 
 const RANGES = [
@@ -24,6 +24,7 @@ const RANGES = [
 ] as const;
 
 type RangeKey = (typeof RANGES)[number]["value"];
+const RANGE_KEYS = RANGES.map((r) => r.value) as RangeKey[];
 
 const HINT_ZH = "滚轮缩放 · 拖拽平移 · 双击复位";
 const HINT_EN = "Scroll to zoom · drag to pan · double-click to reset";
@@ -35,7 +36,16 @@ export default function Market() {
   const { theme, colorblind } = useUI();
   const p = paletteFor(theme, colorblind);
   const [params, setParams] = useSearchParams();
-  const range = (params.get("range") as RangeKey) || "1Y";
+  const rawRange = params.get("range");
+  // 非法 range（?range=FOO）回退默认区间，并把 URL 改成合法值（W7-11）
+  const range = pickRange<RangeKey>(rawRange, RANGE_KEYS, "1Y");
+  useEffect(() => {
+    if (rawRange != null && rawRange !== range) {
+      const next = new URLSearchParams(params);
+      next.set("range", range);
+      setParams(next, { replace: true });
+    }
+  }, [rawRange, range, params, setParams]);
 
   // 触屏（粗指针）或窄屏上关闭单指拖拽平移，页面纵向滚动不被劫持；
   // 双指捏合缩放、底部滑杆与键盘仍然可用。
@@ -100,6 +110,14 @@ export default function Market() {
     if (!series) return [];
     const n = RANGES.find((r) => r.value === range)?.n ?? 250;
     return series.slice(-n);
+  }, [series, range]);
+
+  // 集中度 20 日均线预热：区间首行之前的 19 个交易日（ALL 区间时为空，W6-02）
+  const lead = useMemo(() => {
+    if (!series) return [];
+    const n = RANGES.find((r) => r.value === range)?.n ?? 250;
+    const end = Math.max(0, series.length - n);
+    return series.slice(Math.max(0, end - 19), end);
   }, [series, range]);
 
   const applyRange = (r: RangeKey) => {
@@ -169,7 +187,7 @@ export default function Market() {
   // 换范围 / 主题 / 语言 / 触屏策略变化时才重建 —— 此时窗口复位到全览是预期行为。
   const zoomOpts = useMemo(() => ({ pan }), [pan]);
   const optBreadth = useMemo(() => returnBreadth(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
-  const optConc = useMemo(() => concentrationChart(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
+  const optConc = useMemo(() => concentrationChart(p, rows, lang, zoomOpts, { lead }), [p, rows, lang, zoomOpts, lead]);
   const optDisp = useMemo(() => dispersionChart(p, rows, lang, zoomOpts), [p, rows, lang, zoomOpts]);
 
   if (isError) return <DataState error />;
@@ -184,13 +202,16 @@ export default function Market() {
     );
   }
 
-  const cum = rows.reduce((a, r) => a * (1 + r.ew_ret), 1) - 1;
+  // 区间累计：任一日 ew_ret 缺失/不可用时保持未知，绝不把缺日当平盘继续复利（W5-09）
+  const cum = cumulativeReturn(rows.map((r) => r.ew_ret));
   const breadthRows = rows.filter((r) => r.breadth != null && Number.isFinite(r.breadth));
   const avgBreadth = breadthRows.length ? breadthRows.reduce((a, r) => a + r.breadth, 0) / breadthRows.length : null;
   const maxB = breadthRows.reduce((a, r) => (r.breadth > a.breadth ? r : a), breadthRows[0]);
   const minB = breadthRows.reduce((a, r) => (r.breadth < a.breadth ? r : a), breadthRows[0]);
-  const maxC = rows.reduce((a, r) => ((r.top10_share || 0) > (a.top10_share || 0) ? r : a), rows[0]);
-  const avgCsd = rows.reduce((a, r) => a + r.csd, 0) / rows.length;
+  // 最集中日：只在 top10_share 有有限值的行里比较，CSD 用**该日**的值（W7-02）
+  const maxC = mostConcentratedDay(rows);
+  // 覆盖不足披露：优先数据层 data_quality，字段未上线时退回 n_valid 低样本启发式（W7-04）
+  const coverage = coverageGaps(rows);
   const last = rows[rows.length - 1];
   const prev = series[series.length - 2];
   const breadthValues = breadthRows.map((r) => r.breadth).sort((a, b) => a - b);
@@ -223,9 +244,11 @@ export default function Market() {
     },
     {
       k: zh ? "最集中日" : "Most concentrated",
-      v: shortDate(maxC.trade_date),
+      v: maxC ? shortDate(maxC.trade_date) : "—",
       tone: "",
-      s: `${zh ? "Top10 波动占比" : "Top10 share"} ${ratio(maxC.top10_share, 0)} · CSD ${(avgCsd * 100).toFixed(2)}pp`,
+      s: maxC
+        ? `${zh ? "Top10 波动占比" : "Top10 share"} ${ratio(maxC.top10_share, 0)} · CSD ${maxC.csd == null ? "—" : `${(maxC.csd * 100).toFixed(2)}pp`}`
+        : "—",
     },
   ];
 
@@ -248,6 +271,20 @@ export default function Market() {
         }
         right={<Segmented options={RANGES.map((r) => ({ value: r.value, label: r.label }))} value={range} onChange={changeRange} />}
       />
+
+      {coverage.flagged && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-[var(--warn)]/25 bg-[var(--warn-soft)] px-3 py-2 text-[11.5px] leading-relaxed text-[var(--warn)]"
+        >
+          <span className="mt-[5px] inline-block h-[5px] w-[5px] shrink-0 rounded-full bg-[var(--warn)]" />
+          <span>
+            {zh
+              ? `区间样本覆盖不足：${coverage.total} 个交易日被标记为数据不完整（partial ${coverage.partial} · 低样本 ${coverage.lowSample}，n_valid 最低 ${num(coverage.minNValid)}）。累计收益、均值与极值可能受其影响。`
+              : `Low sample coverage: ${coverage.total} sessions in range are incomplete (partial ${coverage.partial} · low-sample ${coverage.lowSample}, min n_valid ${num(coverage.minNValid)}). Cumulative return, averages and extremes may be affected.`}
+          </span>
+        </div>
+      )}
 
       <div className="card grid grid-cols-2 divide-x divide-[var(--border)] md:grid-cols-3 xl:grid-cols-5">
         {stats.map((s) => (
@@ -309,7 +346,11 @@ export default function Market() {
           <Card
             index="02"
             title={zh ? "集中度：Top10 波动占比" : "Concentration"}
-            subtitle={zh ? "柱：每5交易日均值；线：20日均值" : "Bars: 5-session average Top10 share; line: 20-session average"}
+            subtitle={
+              zh
+                ? "柱：每5交易日均值（按最新交易日右对齐）；线：20日均值（含区间前19个交易日）"
+                : "Bars: 5-session average, right-aligned to the latest session; line: 20-session average (uses 19 sessions before the range)"
+            }
             right={
               <div className="flex items-center gap-3 text-[10.5px] text-[var(--faint)]">
                 <span className="flex items-center gap-1">
@@ -320,6 +361,12 @@ export default function Market() {
                   <i className="inline-block h-[2px] w-4" style={{ background: p.accent }} />
                   20D
                 </span>
+                {coverage.partial > 0 && (
+                  <span className="flex items-center gap-1">
+                    <i className="inline-block h-[7px] w-[3px] rounded-sm" style={{ background: p.copper, opacity: 0.62 }} />
+                    {zh ? "含部分日" : "partial"}
+                  </span>
+                )}
               </div>
             }
             prov={zh ? "Top10 波动占比 = 前10权重股绝对贡献之和 / 全体绝对贡献之和；Top5% 为涨幅前5%股票的正收益份额" : "Top10 absolute-contribution share; top-5% positive-return share"}
@@ -329,7 +376,7 @@ export default function Market() {
               <div className="provline">
                 <span>SOURCE <b>daily / daily_basic</b></span>
                 <span>{zh ? "前一日全市场流通市值权重" : "prior-day float-cap weights"}</span>
-                <span className="r">{zh ? "每5个交易日分组，末组可能不足5日" : "5-session blocks; final block may be shorter"}</span>
+                <span className="r">{zh ? "按最新交易日右对齐，最旧一组可能不足5日" : "Right-aligned 5-session blocks; the oldest block may be shorter"}</span>
               </div>
             }
           >
@@ -350,10 +397,10 @@ export default function Market() {
           <Card
             index="03"
             title={zh ? "分化度：横截面离散" : "Dispersion"}
-            subtitle={zh ? "实线 CSD（灰）· 实线 IQR（金）· 以及等权与流通市值加权的差距" : "Solid CSD (gray) and IQR (gold), plus the EW−CW gap"}
+            subtitle={zh ? "实线 CSD（灰）· 实线 IQR（金）· 等权与加权差（EW−CW）见 tooltip" : "Solid CSD (gray) and IQR (gold); the EW−CW gap is in the tooltip"}
             right={
               <div className="flex items-center gap-2 text-[10.5px] text-[var(--faint)]">
-                <span className="inline-block h-[2px] w-3" style={{ background: p.accent }} />
+                <span className="inline-block h-[2px] w-3" style={{ background: p.text2 }} />
                 CSD
                 <span className="inline-block h-[2px] w-3" style={{ background: p.accent }} />
                 IQR
@@ -386,7 +433,7 @@ export default function Market() {
 
       <div className="flex flex-wrap items-center justify-between gap-2 pb-1 pt-0.5 text-[10.5px] text-[var(--faint)]">
         <span className="font-mono">
-          {`${zh ? "来源" : "Source"}: ${meta?.source || (zh ? "未知" : "unknown")} · daily / daily_basic / index_daily`}
+          {`${zh ? "来源" : "Source"}: ${displaySource(meta?.source)} · daily / daily_basic / index_daily`}
         </span>
         <span className="mono">
           {last.trade_date} · {zh ? "日均成交额" : "avg turnover"} {money(rows.reduce((a, r) => a + r.amount, 0) / rows.length)}

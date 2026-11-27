@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -52,21 +52,21 @@ export function CommandPalette({ open, onClose }: Props) {
       {
         group: zh ? "视图" : "View",
         label: zh ? (theme === "dark" ? "切换到浅色主题" : "切换到深色主题") : theme === "dark" ? "Switch to light" : "Switch to dark",
-        hint: "⌘ L",
+        hint: "Alt T",
         keywords: "theme light dark 主题 浅色 深色",
         run: () => { toggleTheme(); onClose(); },
       },
       {
         group: zh ? "视图" : "View",
         label: zh ? (i18n.language === "zh" ? "切换到 English" : "切换到中文") : i18n.language === "zh" ? "Switch to English" : "切换到中文",
-        hint: "⌘ I",
+        hint: "Alt I",
         keywords: "language 语言 中文 english",
         run: () => { setLang(i18n.language === "zh" ? "en" : "zh"); onClose(); },
       },
       {
         group: zh ? "视图" : "View",
         label: colorblind ? (zh ? "关闭色盲友好配色" : "Disable colorblind palette") : zh ? "开启色盲友好配色" : "Enable colorblind palette",
-        hint: "⌘ B",
+        hint: "Alt B",
         keywords: "colorblind 色盲 配色",
         run: () => { toggleColorblind(); onClose(); },
       },
@@ -80,7 +80,7 @@ export function CommandPalette({ open, onClose }: Props) {
       {
         group: zh ? "数据" : "Data",
         label: zh ? "刷新全部数据" : "Refresh all data",
-        hint: "⌘ R",
+        hint: "Alt R",
         keywords: "refresh 刷新 更新",
         run: () => { qc.invalidateQueries(); onClose(); },
       },

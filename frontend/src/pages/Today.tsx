@@ -12,7 +12,7 @@ import EChart from "../components/EChart";
 import { Card } from "../components/Card";
 import { Kpi } from "../components/Kpi";
 import { DataState } from "../components/DataState";
-import { indexSummary, percentile } from "../lib/viewMetrics";
+import { indexSummary, percentile, topGainers } from "../lib/viewMetrics";
 import { Prov } from "../components/PageHead";
 
 const avg = (xs: number[]) => { const valid = xs.filter((x) => x != null && Number.isFinite(x)); return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : NaN; };
@@ -42,12 +42,12 @@ export default function Today() {
   const last = series && series.length ? series[series.length - 1] : undefined;
   const d = last?.trade_date;
 
-  const { data: detail } = useQuery({
+  const { data: detail, isError: detailError, isPending: detailPending } = useQuery({
     queryKey: ["market-day", d],
     queryFn: () => api.marketDay(d as string),
     enabled: !!d,
   });
-  const { data: dist } = useQuery({
+  const { data: dist, isError: distError, isPending: distPending } = useQuery({
     queryKey: ["distribution", d],
     queryFn: () => api.distribution(d as string),
     enabled: !!d,
@@ -71,13 +71,9 @@ export default function Today() {
   const last20 = series.slice(-21, -1);
   const regime = regimeOf(last);
   const tone = last.ew_ret >= 0 ? "up" : "down";
-  const breadthPct = Math.round(last.breadth * 100);
   const prev = series[series.length - 2];
-  const rank = series.slice(-250).filter((r) => r.breadth <= last.breadth).length;
   const breadthPctile = percentile(series.slice(-250).map((r) => r.breadth), last.breadth);
   const breadthRank = breadthPctile == null ? "—" : String(breadthPctile);
-  const avg20Breadth = avg(last20.map((r) => r.breadth));
-  const breadthDelta = last.breadth == null ? NaN : (last.breadth - avg20Breadth) * 100;
 
   const contributors = detail?.contributors || [];
   const topDrag = [...contributors].sort((a, b) => a.contrib - b.contrib)[0];
@@ -91,10 +87,18 @@ export default function Today() {
     .sort((a, b) => Math.abs(b.cw_ret - b.ew_ret) - Math.abs(a.cw_ret - a.ew_ret))
     .slice(0, 5);
   const maxTilt = Math.max(...leaderTilt.map((s) => Math.abs(s.cw_ret - s.ew_ret)), 0.0001);
-  const broadSectors = sectors.filter((s) => s.breadth >= 0.6).length;
+  // 行业明细缺失时保持"未知"，绝不把缺数当 0 个行业（W7-05）
+  const broadSectors = sectors.length ? sectors.filter((s) => s.breadth >= 0.6).length : null;
+  // 显式排序消除静态导出与 API 的 payload 顺序差异（W7-01）：EW 收益降序 + 行业名 tie-break
+  const gainers = topGainers(sectors, 2);
+  const detailsNote = detailError
+    ? (zh ? "行业明细加载失败" : "Sector detail unavailable")
+    : detailPending
+      ? (zh ? "行业明细加载中…" : "Loading sector detail…")
+      : "—";
   const limitAverage = avg(last20.map((r) => r.limit_up_n));
   const limitRatio = last.limit_up_n == null || !(limitAverage > 0) ? null : last.limit_up_n / limitAverage;
-  const sparkDates = series.slice(-21).map((r) => r.trade_date);
+  const sparkDates = series.slice(-20).map((r) => r.trade_date);
 
   const kpis = [
     {
@@ -103,7 +107,7 @@ export default function Today() {
       tone: "neutral" as const,
       sub: `${num(last.n_adv)} ↑ / ${num(last.n_dec)} ↓ · ${zh ? `${breadthRank} 分位` : `${breadthPctile == null ? "—" : ord(breadthPctile)} pct`}`,
       to: "/regime",
-      spark: series.slice(-21).map((r) => r.breadth),
+      spark: series.slice(-20).map((r) => r.breadth),
       sparkTone: "accent" as const,
       hint: zh ? "广度 = 上涨家数 /（上涨 + 下跌），平盘剔除" : "Breadth = advancers / (advancers + decliners), flat excluded",
       main: true,
@@ -114,7 +118,7 @@ export default function Today() {
       tone: tone as "up" | "down",
       sub: `${t("metric.index")} ${pct(last.hs300_ret)}`,
       to: "/market",
-      spark: series.slice(-21).map((r) => r.ew_ret),
+      spark: series.slice(-20).map((r) => r.ew_ret),
       sparkTone: tone as "up" | "down",
       hint: zh ? "全市场算术平均收益，等权口径" : "Arithmetic mean return, equal-weighted",
     },
@@ -124,7 +128,7 @@ export default function Today() {
       tone: "neutral" as const,
       sub: `${t("metric.limitDown")} ${num(last.limit_down_n)} · ${zh ? "最高" : "max"} ${last.max_streak ?? "—"} ${zh ? "板" : "boards"}`,
       to: "/sentiment",
-      spark: series.slice(-21).map((r) => r.limit_up_n),
+      spark: series.slice(-20).map((r) => r.limit_up_n),
       sparkTone: "up" as const,
       hint: zh
         ? "价格口径：收盘价 ≥ 涨停价 × 0.999，含 ST。全历史无缺失；因含 ST，比交易所官方名单（不含 ST）日均多约 15 家"
@@ -136,7 +140,7 @@ export default function Today() {
       tone: "neutral" as const,
       sub: `${zh ? "样本" : "Sample"} ${num(last.n_valid)} ${zh ? "只" : "stocks"}`,
       to: "/market",
-      spark: series.slice(-21).map((r) => r.amount),
+      spark: series.slice(-20).map((r) => r.amount),
       sparkTone: "neutral" as const,
       hint: zh ? "全市场成交额，单位自适应" : "Total turnover, auto unit",
     },
@@ -146,7 +150,7 @@ export default function Today() {
       tone: "neutral" as const,
       sub: `${t("metric.median")} ${pct(last.med_ret)} · IQR ${(last.iqr * 100).toFixed(2)}pp`,
       to: "/stocks",
-      spark: series.slice(-21).map((r) => r.csd),
+      spark: series.slice(-20).map((r) => r.csd),
       sparkTone: "accent" as const,
       hint: zh ? "横截面收益标准差，衡量个股分化" : "Cross-sectional return dispersion",
     },
@@ -262,16 +266,21 @@ export default function Today() {
                 {
                   n: "01",
                   h: zh ? `沪深300 ${pct(last.hs300_ret)}，等权 ${pct(last.ew_ret)}` : `CSI 300 ${pct(last.hs300_ret)} vs EW ${pct(last.ew_ret)}`,
-                  p: zh
-                    ? `Top10 波动占比 ${ratio(last.top10_share, 0)}${topDrag ? ` · ${topDrag.name} ${(topDrag.contrib * 100).toFixed(2)}pp` : ""}`
-                    : `CSI 300 ${pct(last.hs300_ret)} vs equal-weight ${pct(last.ew_ret)}`,
+                  p: `${t("metric.top10")} ${ratio(last.top10_share, 0)}${topDrag ? ` · ${topDrag.name} ${(topDrag.contrib * 100).toFixed(2)}pp` : ""}`,
                 },
                 {
                   n: "02",
-                  h: zh ? `${broadSectors} 个行业广度超过 60%` : `${broadSectors} sectors above 60% breadth`,
-                  p: zh
-                    ? `${sectors[0]?.sw_l1 ?? "—"} ${ratio(sectors[0]?.breadth ?? null, 0)} · ${sectors[1]?.sw_l1 ?? "—"} ${ratio(sectors[1]?.breadth ?? null, 0)}`
-                    : `${broadSectors} of 31 sectors have breadth above 60%`,
+                  h: broadSectors == null
+                    ? (zh ? "行业广度数据不可用" : "Sector breadth unavailable")
+                    : zh
+                      ? `${broadSectors} 个行业广度超过 60%`
+                      : `${broadSectors} of ${sectors.length} sectors above 60% breadth`,
+                  // 明确语义：涨幅前二行业（EW 收益降序 + 行业名 tie-break），离线/API 顺序一致（W7-01）
+                  p: broadSectors == null
+                    ? detailsNote
+                    : zh
+                      ? `涨幅前二：${gainers.map((g) => `${g.sw_l1} ${pct(g.ew_ret)}`).join(" · ") || "—"}`
+                      : `Top-2 gainers: ${gainers.map((g) => `${g.sw_l1} ${pct(g.ew_ret)}`).join(" · ") || "—"}`,
                 },
                 {
                   n: "03",
@@ -333,11 +342,19 @@ export default function Today() {
                   </div>
                 );
               })}
-              {!contrib.length && <div className="py-8 text-center text-[12px] text-[var(--muted)]">{zh ? "暂无贡献数据" : "Contribution data unavailable"}</div>}
+              {!contrib.length && (
+                <div className="py-8 text-center text-[12px] text-[var(--muted)]">
+                  {detailError
+                    ? (zh ? "贡献明细不可用" : "Contribution detail unavailable")
+                    : detailPending
+                      ? (zh ? "贡献明细加载中…" : "Loading contribution detail…")
+                      : (zh ? "暂无贡献数据" : "No contribution rows")}
+                </div>
+              )}
             </div>
             <div className="provline">
-              <span>Top10 波动占比 <b>{ratio(last.top10_share, 0)}</b></span>
-              <span>{zh ? "集中度" : "concentration"} HHI <b>{num(last.hhi)}</b></span>
+              <span>{t("metric.top10")} <b>{ratio(last.top10_share, 0)}</b></span>
+              <span>{t("metric.hhi")} <b>{num(last.hhi)}</b></span>
               <a className="r hover:underline" href="#/stocks">{zh ? "点击查看全部 →" : "View all →"}</a>
             </div>
           </Card>
@@ -350,7 +367,7 @@ export default function Today() {
           <Card
             index="04"
             title={zh ? "行业参与：收益 × 广度" : "Sector participation: return × breadth"}
-            subtitle={zh ? "横轴 = 行业等权收益 · 纵轴 = 上涨占比 · 气泡 = 成交额 · 四象限：普涨 / 集中 / 普跌 / 分化" : "x = sector EW return, y = breadth, size = turnover · quadrants at 0% / 50%"}
+            subtitle={zh ? "横轴 = 行业等权收益 · 纵轴 = 上涨占比 · 气泡面积 = 成交额 · 四象限：普涨 / 集中 / 普跌 / 分化" : "x = sector EW return, y = breadth, area = turnover · quadrants at 0% / 50%"}
             right={
               <div className="flex items-center gap-2.5 text-[10.5px] text-[var(--faint)]">
                 {[
@@ -366,7 +383,7 @@ export default function Today() {
                 ))}
               </div>
             }
-            prov={zh ? "横轴行业等权收益，纵轴行业内上涨占比，气泡面积按成交额" : "x = sector EW return, y = breadth, size = turnover"}
+            prov={zh ? "横轴行业等权收益，纵轴行业内上涨占比，气泡面积按成交额" : "x = sector EW return, y = breadth, area = turnover"}
             padded={false}
             bodyClass="pt-0"
             footer={
@@ -388,7 +405,11 @@ export default function Today() {
                     },
                   }}
                   ariaLabel={zh ? "行业收益与广度气泡图" : "Sector return vs breadth"}
-                /> : <Skeleton h={286} />}
+                /> : detailPending ? <Skeleton h={286} /> : (
+                  <div className="grid h-[286px] place-items-center text-[12px] text-[var(--muted)]">
+                    {detailError ? (zh ? "行业明细不可用" : "Sector detail unavailable") : (zh ? "暂无行业数据" : "No sector rows")}
+                  </div>
+                )}
             </div>
           </Card>
         </div>
@@ -398,7 +419,7 @@ export default function Today() {
             index="05"
             title={t("today.distribution")}
             subtitle={zh ? "当日个股收益横截面 · 截尾 ±11% · 纵轴：只数" : "Cross-section of stock returns, clipped ±11% · y: count"}
-            right={<span className="pill">{zh ? "样本" : "N"} {num(dist?.stats.n || last.n_valid)}</span>}
+            right={<span className="pill">{zh ? "样本" : "N"} {dist?.stats?.n != null ? num(dist.stats.n) : "—"}</span>}
             prov={zh ? "横截面直方图，中位线为当日个股收益中位数" : "Histogram of stock returns, median marked"}
             padded={false}
             bodyClass="pt-0"
@@ -414,8 +435,12 @@ export default function Today() {
             <div className="h-[286px] px-1 pb-1 md:px-2">
               {dist?.bins?.length ? (
                 <EChart option={distributionChart(p, dist.bins, dist.stats, lang)} ariaLabel={zh ? "个股收益分布" : "Return distribution"} />
-              ) : (
+              ) : distPending ? (
                 <Skeleton h={286} />
+              ) : (
+                <div className="grid h-[286px] place-items-center text-[12px] text-[var(--muted)]">
+                  {distError ? (zh ? "收益分布不可用" : "Distribution unavailable") : (zh ? "暂无分布数据" : "No distribution rows")}
+                </div>
               )}
             </div>
           </Card>
@@ -434,7 +459,7 @@ export default function Today() {
             bodyClass="pt-1"
           >
             <div className="flex flex-col px-4 pb-2 md:px-[18px]">
-              {boardTop.map((s) => (
+              {boardTop.length ? boardTop.map((s) => (
                 <div key={s.sw_l1} className="grid grid-cols-[76px_1fr_40px_48px] items-center gap-2 border-b border-[var(--border)] py-[7px] last:border-0 md:grid-cols-[92px_1fr_44px_52px]">
                   <span className="truncate text-[11.5px] text-[var(--text-2)]">{s.sw_l1}</span>
                   <div className="h-[4px] rounded-full bg-[var(--surface-2)]">
@@ -443,7 +468,11 @@ export default function Today() {
                   <span className="mono text-right text-[11px] text-[var(--text)]">{ratio(s.breadth, 0)}</span>
                   <span className={`mono text-right text-[11px] ${trendClass(s.ew_ret)}`}>{pct(s.ew_ret)}</span>
                 </div>
-              ))}
+              )) : (
+                <div className="py-8 text-center text-[12px] text-[var(--muted)]">
+                  {detailPending ? (zh ? "加载中…" : "Loading…") : detailError ? (zh ? "行业明细不可用" : "Sector detail unavailable") : (zh ? "暂无行业数据" : "No sector rows")}
+                </div>
+              )}
             </div>
           </Card>
         </div>
@@ -465,7 +494,7 @@ export default function Today() {
                 </div>
                 <span />
               </div>
-              {leaderTilt.map((s) => {
+              {leaderTilt.length ? leaderTilt.map((s) => {
                 const tilt = s.cw_ret - s.ew_ret;
                 const w = Math.min(50, (Math.abs(tilt) / maxTilt) * 50);
                 return (
@@ -483,7 +512,11 @@ export default function Today() {
                     </span>
                   </div>
                 );
-              })}
+              }) : (
+                <div className="py-8 text-center text-[12px] text-[var(--muted)]">
+                  {detailPending ? (zh ? "加载中…" : "Loading…") : detailError ? (zh ? "行业明细不可用" : "Sector detail unavailable") : (zh ? "暂无行业数据" : "No sector rows")}
+                </div>
+              )}
             </div>
           </Card>
         </div>

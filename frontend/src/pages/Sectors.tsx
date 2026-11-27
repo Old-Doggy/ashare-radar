@@ -17,7 +17,16 @@ import { DataState } from "../components/DataState";
 import { Segmented } from "../components/Segmented";
 import { RotationPanel, type RotationPanelHandle } from "../components/RotationPanel";
 import { RotationDataState } from "../components/RotationDataState";
-import { cumulativePath, median } from "../lib/viewMetrics";
+import { cumulativePath } from "../lib/viewMetrics";
+import {
+  breadthBasisText,
+  distributionDomain,
+  distributionPercent,
+  heatGroups,
+  missingHeatCount,
+  pickDefaultSector,
+  sortSectorBoard,
+} from "../lib/rotation";
 import { PageHead } from "../components/PageHead";
 
 export default function Sectors() {
@@ -74,7 +83,8 @@ export default function Sectors() {
   });
 
   const rows = sectors ?? [];
-  const selected = sel ?? rows[0]?.sw_l1 ?? null;
+  // W8-02：默认选中行业用确定规则（广度→收益→名称），不依赖 API/静态 payload 的行序。
+  const selected = pickDefaultSector(rows, sel);
   const selRow = rows.find((r) => r.sw_l1 === selected) as SectorDay | undefined;
   // F6-6：导出前先暂停（exportPng 内部同步 pause rAF），轮动模式下取 LiveChart 当前帧
   const exportPng = () => {
@@ -110,22 +120,29 @@ export default function Sectors() {
     const winSet = new Set(winMonths);
     const rows = (monthly ?? []).filter((m) => winSet.has(m.month));
     const ret = new Map(rows.map((m) => [`${m.month}|${m.sw_l1}`, m.ew_ret_cum]));
-    const scored = [...new Set(rows.map((m) => m.sw_l1))]
-      .map((name) => {
-        const monthlyReturns = winMonths.map((mo) => ret.get(`${mo}|${name}`) ?? null);
-        const path = cumulativePath(monthlyReturns);
-        return { name, score: path[path.length - 1] ?? null, values: monthlyReturns };
-      })
-      .filter((row): row is { name: string; score: number; values: (number | null)[] } => row.score != null)
-      .sort((a, b) => b.score - a.score);
-    const groups = heatScope === "all" ? [scored] : scored.length <= 12 ? [scored] : [scored.slice(0, 6), scored.slice(-6)];
-    const shown = groups.flat();
-    const barMax = Math.max(...shown.flatMap((s) => s.values.map((v) => Math.abs(v ?? 0))), 0.01);
-    return { months: winMonths, rows: rows.length, groups, count: shown.length, barMax };
+    // W8-07：缺月行业不再被 filter 掉，保留并排到末尾（灰显），行数 = 行业总数。
+    const scored = [...new Set(rows.map((m) => m.sw_l1))].map((name) => {
+      const monthlyReturns = winMonths.map((mo) => ret.get(`${mo}|${name}`) ?? null);
+      const path = cumulativePath(monthlyReturns);
+      return { name, score: path[path.length - 1] ?? null, values: monthlyReturns };
+    });
+    const groups = heatGroups(scored, heatScope);
+    return {
+      months: winMonths,
+      rows: rows.length,
+      groups,
+      count: groups.flat().length,
+      total: scored.length,
+      missing: missingHeatCount(scored),
+    };
   }, [monthly, heatWindow, heatScope]);
-  const heatMax = Math.max(...heat.groups.flat().map((s) => Math.abs(s.score)), 0.01);
+  const heatMax = Math.max(
+    ...heat.groups.flat().map((s) => (s.score == null ? 0 : Math.abs(s.score))),
+    0.01,
+  );
 
-  const board = useMemo(() => [...rows].sort((a, b) => b.breadth - a.breadth), [rows]);
+  // W8-03：广度榜与 best/worst 用确定的 tiebreak（广度 → 等权收益 → 名称码位）。
+  const board = useMemo(() => sortSectorBoard(rows), [rows]);
 
   const rotStats = useMemo(() => {
     const list = [...(rotation ?? [])].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
@@ -137,10 +154,12 @@ export default function Sectors() {
     return { latest: latest.rotation_intensity, avg20, pctile, days: list.length };
   }, [rotation]);
   const quadCounts = useMemo(() => {
+    // W6-05：与 metric_contracts/regime.ts 一致——ew_ret<=0 且 breadth>=50% 才是“结构分化”。
     const broad = rows.filter((r) => r.ew_ret > 0 && r.breadth >= 0.5).length;
     const narrow = rows.filter((r) => r.ew_ret > 0 && r.breadth < 0.5).length;
-    const selloff = rows.filter((r) => r.ew_ret < 0 && r.breadth < 0.5).length;
-    return { broad, narrow, selloff, mixed: rows.length - broad - narrow - selloff, over50: rows.filter((r) => r.breadth >= 0.5).length };
+    const selloff = rows.filter((r) => r.ew_ret <= 0 && r.breadth < 0.5).length;
+    const mixed = rows.filter((r) => r.ew_ret <= 0 && r.breadth >= 0.5).length;
+    return { broad, narrow, selloff, mixed, over50: rows.filter((r) => r.breadth >= 0.5).length };
   }, [rows]);
   const selStocks = (stocks ?? []).filter((s) => s.sw_l1 === selected).sort((a, b) => b.ret - a.ret);
   const top = selStocks.slice(0, 6);
@@ -151,7 +170,10 @@ export default function Sectors() {
   const best = board[0];
   const worst = board[board.length - 1];
   const upCount = rows.filter((r) => r.ew_ret > 0).length;
-  const med = median(rows.map((r) => r.ew_ret));
+  // W8-05：q10–q90 分布条轴域按该行业数据自适应，超出 ±11% 时不再静默截尾。
+  const distDom = distributionDomain(selRow?.q10, selRow?.q90);
+  const distPos = (v: number | null | undefined) => distributionPercent(v, distDom) ?? 0;
+  const distAdaptive = distDom > 0.11 + 1e-9;
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -159,19 +181,19 @@ export default function Sectors() {
         kicker={`${zh ? "行业参与" : "Sectors"} / ${d} · ${rows.length} ${zh ? "个申万一级" : "SW L1"}`}
         title={
           zh
-            ? `${best.sw_l1} ${ratio(best.breadth, 0)} 的股票在涨，${worst.sw_l1} 只有 ${ratio(worst.breadth, 0)}`
-            : `${best.sw_l1} ${ratio(best.breadth, 0)} advancing vs ${worst.sw_l1} ${ratio(worst.breadth, 0)}`
+            ? `${best.sw_l1} 上涨家数占比 ${ratio(best.breadth, 0)}（平盘剔除），${worst.sw_l1} 仅 ${ratio(worst.breadth, 0)}`
+            : `${best.sw_l1} ${ratio(best.breadth, 0)} advancing (flats excluded) vs ${worst.sw_l1} ${ratio(worst.breadth, 0)}`
         }
         dek={
           zh
-            ? `同一天，${rows.length} 个申万一级行业的上涨占比从 ${ratio(worst.breadth, 0)} 到 ${ratio(best.breadth, 0)}；可查看收益、成交额、行业内部结构与月度轨迹`
-            : `On the same day, sector breadth ranges from ${ratio(worst.breadth, 0)} to ${ratio(best.breadth, 0)}; inspect returns, turnover, internal structure and monthly paths`
+            ? `同一天，${rows.length} 个申万一级行业的上涨家数占比（上涨 /（上涨 + 下跌），平盘剔除）从 ${ratio(worst.breadth, 0)} 到 ${ratio(best.breadth, 0)}；可查看收益、成交额、行业内部结构与月度轨迹`
+            : `On the same day, sector breadth — advancers / (advancers + decliners), flats excluded — ranges from ${ratio(worst.breadth, 0)} to ${ratio(best.breadth, 0)}; inspect returns, turnover, internal structure and monthly paths`
         }
         chips={
           <>
             <span className="pill">{zh ? "申万一级" : "SW L1"}</span>
             <span className="pill">{zh ? "等权" : "Equal-weight"}</span>
-            <span className="pill">{zh ? "31 个行业" : "31 sectors"}</span>
+            <span className="pill">{rows.length} {zh ? "个行业" : "sectors"}</span>
           </>
         }
         right={
@@ -238,8 +260,8 @@ export default function Sectors() {
               mode === "rot"
                 ? t("rotate.hint")
                 : zh
-                  ? "横轴行业等权收益，纵轴行业内上涨占比，气泡面积按成交额"
-                  : "x = EW return, y = breadth, size = turnover"
+                  ? "横轴行业等权收益，纵轴行业内上涨家数占比（平盘剔除），气泡大小按成交额缩放"
+                  : "x = EW return, y = breadth (adv/(adv+dec)), bubble size scales with turnover"
             }
             padded={false}
             bodyClass="pt-0"
@@ -282,9 +304,9 @@ export default function Sectors() {
           <Card
             index="02"
             title={zh ? "行业广度榜" : "Breadth ranking"}
-            subtitle={zh ? "行业内上涨股票占比 · 50% 是分水岭 · 点击下钻" : "Share of constituents advancing · 50% is the divide"}
+            subtitle={`${breadthBasisText(lang)} · 50% ${zh ? "是分水岭" : "is the divide"} · ${zh ? "点击下钻" : "click to drill"}`}
             right={<span className="pill">{quadCounts.over50}/{rows.length} ≥50%</span>}
-            prov={zh ? "广度 = 行业内上涨家数 /（上涨+下跌）；右列为当日等权收益" : "Breadth = advancers / (adv + dec); right column is EW return"}
+            prov={`${breadthBasisText(lang)}；${zh ? "右列为当日等权收益；并列按等权收益 → 名称码位排序" : "right column is EW return; ties broken by EW return then name"}`}
             padded={false}
             bodyClass="pt-0"
             footer={
@@ -337,7 +359,7 @@ export default function Sectors() {
         index="03"
         title={zh ? "市场云图 · 成交额 × 今日涨跌" : "Market map · turnover × return"}
         subtitle={zh ? "面积 = 成交额 · 颜色 = 涨跌幅 · 分组 = 申万一级 · 成交额前 30 只 · 点击色块选行业" : "Area = turnover · colour = return · grouped by SW L1 · top 30 by turnover · click a tile to select"}
-        right={<div className="flex items-center gap-1.5"><span className="micro">跌</span><span className="h-[6px] w-20 rounded-full" style={{ background: `linear-gradient(90deg, ${p.down}, #b9a67a, ${p.up})` }} /><span className="micro">涨</span></div>}
+        right={<div className="flex items-center gap-1.5"><span className="micro">{zh ? "跌" : "Down"}</span><span className="h-[6px] w-20 rounded-full" style={{ background: `linear-gradient(90deg, ${p.down}, #b9a67a, ${p.up})` }} /><span className="micro">{zh ? "涨" : "Up"}</span></div>}
         prov={zh ? "面积 = 成交额；颜色按当日涨跌幅连续映射，低涨幅接近沙色，高涨幅深红，跌幅转绿" : "Area = turnover; colour maps continuously from green through sand to red"}
         padded={false}
         bodyClass="pt-0"
@@ -373,8 +395,8 @@ export default function Sectors() {
         title={zh ? "行业月度收益 · 轨迹" : "Monthly return paths"}
         subtitle={
           zh
-            ? `近 ${heatWindow} 个月 · ${heatScope === "focus" ? "领涨 / 落后各 6 · 小倍数 · 同一纵轴 · 点击卡片选中" : "31 个申万一级行业 · 12M 累计收益排序"}`
-            : `Last ${heatWindow} months · ${heatScope === "focus" ? "top / bottom 6 · cumulative paths · click a line" : "all 31 SW L1 · ranked by 12M cumulative return"}`
+            ? `近 ${heatWindow} 个月 · ${heatScope === "focus" ? "领涨 / 落后各 6 · 小倍数 · 同一纵轴 · 点击卡片选中" : `${heat.total} 个申万一级行业 · ${heatWindow}M 累计收益排序`}`
+            : `Last ${heatWindow} months · ${heatScope === "focus" ? "top / bottom 6 · cumulative paths · click a line" : `all ${heat.total} SW L1 · ranked by ${heatWindow}M cumulative return`}`
         }
         right={
           <div className="flex flex-wrap items-center gap-1.5">
@@ -395,16 +417,22 @@ export default function Sectors() {
               onClick={() => setHeatScope((s) => (s === "focus" ? "all" : "focus"))}
               className="rounded-md border border-[var(--border)] px-2 py-[4px] text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--text)]"
             >
-              {heatScope === "focus" ? (zh ? "重点 12" : "Focus 12") : zh ? "全部 31" : "All 31"}
+              {heatScope === "focus"
+                ? zh
+                  ? `重点 ${Math.min(12, heat.total)}`
+                  : `Focus ${Math.min(12, heat.total)}`
+                : zh
+                  ? `全部 ${heat.total}`
+                  : `All ${heat.total}`}
             </button>
           </div>
         }
         prov={
           zh
             ? heatScope === "focus"
-              ? "每条线 = 该行业区间累计收益（月初归一为 0）；点击线选中行业"
-              : "横条 = 区间累计收益；按 12M 累计收益排序"
-            : "Each line = compounded monthly return; click a line to select"
+              ? "每条线 = 该行业区间累计收益（月初归一为 0）；点击线选中行业；缺月行业显示为 —"
+              : `横条 = 区间累计收益；按 ${heatWindow}M 累计收益排序；缺月行业保留并灰显为 —`
+            : "Each line = compounded monthly return; click a line to select; sectors with missing months stay as —"
         }
         padded={false}
         bodyClass="pt-0"
@@ -413,6 +441,9 @@ export default function Sectors() {
             <span>SOURCE <b>sw_daily</b></span>
             <span>{zh ? "申万一级" : "SW L1"}</span>
             <span>{heat.count} {zh ? "个行业" : "sectors"} · {heat.months.length} {zh ? "个月" : "months"} · {heat.months[0]?.slice(0, 7)} → {heat.months[heat.months.length - 1]?.slice(0, 7)}</span>
+            {heat.missing > 0 && (
+              <span className="text-[var(--warn)]">{zh ? `缺月行业 ${heat.missing} 个` : `${heat.missing} sectors with missing months`}</span>
+            )}
             <span className="r">{heatScope === "focus" ? (zh ? "累计复利" : "compounded") : zh ? `${heatWindow}M 累计` : `${heatWindow}M cumulative`}</span>
           </div>
         }
@@ -427,7 +458,9 @@ export default function Sectors() {
                 <span className="micro text-[var(--faint)]">{zh ? "点击行下钻" : "click to drill"}</span>
               </div>
               {heat.groups[0].map((s) => {
-                const w = (Math.abs(s.score) / heatMax) * 50;
+                // W8-07：缺月行业 score=null，保留并灰显为 —（不参与条形长度）
+                const score = s.score;
+                const w = score == null ? 0 : (Math.abs(score) / heatMax) * 50;
                 return (
                   <button
                     key={s.name}
@@ -436,20 +469,20 @@ export default function Sectors() {
                       s.name === selected ? "bg-[var(--accent)]/10" : "hover:bg-[var(--surface-2)]"
                     }`}
                   >
-                    <span className={`truncate text-[11px] ${s.name === selected ? "text-[var(--text)]" : "text-[var(--text-2)]"}`}>{s.name}</span>
+                    <span className={`truncate text-[11px] ${score == null ? "text-[var(--faint)]" : s.name === selected ? "text-[var(--text)]" : "text-[var(--text-2)]"}`}>{s.name}</span>
                     <span className="relative h-[7px] rounded-full bg-[var(--surface-2)]">
                       <span className="absolute inset-y-0 left-1/2 w-px bg-[var(--border-strong)]" />
                       <span
                         className="absolute inset-y-0 rounded-full"
                         style={{
                           width: `${w}%`,
-                          left: s.score >= 0 ? "50%" : `${50 - w}%`,
-                          background: s.score >= 0 ? p.up : p.down,
-                          opacity: 0.82,
+                          left: score == null ? "50%" : score >= 0 ? "50%" : `${50 - w}%`,
+                          background: score == null ? p.muted : score >= 0 ? p.up : p.down,
+                          opacity: score == null ? 0.3 : 0.82,
                         }}
                       />
                     </span>
-                    <span className={`mono text-right text-[11px] ${trendClass(s.score)}`}>{pct(s.score)}</span>
+                    <span className={`mono text-right text-[11px] ${trendClass(score)}`}>{pct(score)}</span>
                   </button>
                 );
               })}
@@ -564,7 +597,11 @@ export default function Sectors() {
                 ? `${selRow.n} ${zh ? "只" : "stocks"} · ${zh ? "广度" : "breadth"} ${ratio(selRow.breadth, 0)} · IQR ${(selRow.iqr * 100).toFixed(1)}pp`
                 : ""
             }
-            prov={zh ? "q10–q90 为行业内收益分布，竖线为中位数" : "q10–q90 distribution, line = median"}
+            prov={
+              zh
+                ? `q10–q90 为行业内收益分布，竖线为中位数；分布条轴域 ±${(distDom * 100).toFixed(0)}%${distAdaptive ? "（按数据自适应）" : ""}`
+                : `q10–q90 distribution, line = median; bar domain ±${(distDom * 100).toFixed(0)}%${distAdaptive ? " (adaptive)" : ""}`
+            }
           >
             <div className="grid grid-cols-2 gap-2.5">
               {[
@@ -587,17 +624,29 @@ export default function Sectors() {
                   <span>{zh ? "行业内分布" : "inside distribution"}</span>
                   <span>q90 {pct(selRow.q90 ?? null)}</span>
                 </div>
+                {/* W8-05：轴域随 q10/q90 自适应（默认 ±11%），条形不再静默截尾 */}
                 <div className="relative mt-1.5 h-[6px] rounded-full bg-[var(--surface-2)]">
                   <div
                     className="absolute inset-y-0 rounded-full bg-[var(--accent)]/25"
-                    style={{ left: `${Math.max(0, Math.min(100, (((selRow.q10 ?? 0) * 100 + 11) / 22) * 100))}%`, width: `${Math.max(2, Math.min(100, (((selRow.q90 ?? 0) - (selRow.q10 ?? 0)) * 100 / 22) * 100))}%` }}
+                    style={{
+                      left: `${distPos(selRow.q10)}%`,
+                      width: `${Math.max(0, distPos(selRow.q90) - distPos(selRow.q10))}%`,
+                    }}
                   />
                   <div
                     className="absolute inset-y-0 rounded-full bg-[var(--accent)]/60"
-                    style={{ left: `${Math.max(0, Math.min(100, (((selRow.q25 ?? 0) * 100 + 11) / 22) * 100))}%`, width: `${Math.max(1, Math.min(100, (((selRow.q75 ?? 0) - (selRow.q25 ?? 0)) * 100 / 22) * 100))}%` }}
+                    style={{
+                      left: `${distPos(selRow.q25)}%`,
+                      width: `${Math.max(0, distPos(selRow.q75) - distPos(selRow.q25))}%`,
+                    }}
                   />
-                  <div className="absolute -top-[2px] h-[10px] w-[2px] rounded bg-[var(--text)]" style={{ left: `${Math.max(0, Math.min(99, (((selRow.med_ret ?? 0) * 100 + 11) / 22) * 100))}%` }} />
+                  <div className="absolute -top-[2px] h-[10px] w-[2px] rounded bg-[var(--text)]" style={{ left: `${Math.min(99, distPos(selRow.med_ret))}%` }} />
                 </div>
+                {distAdaptive && (
+                  <div className="mt-1 font-mono text-[9.5px] text-[var(--warn)]">
+                    {zh ? `分布条轴域 ±${(distDom * 100).toFixed(0)}%（超出 ±11%，按数据自适应）` : `bar domain ±${(distDom * 100).toFixed(0)}% (outside ±11%, adaptive)`}
+                  </div>
+                )}
               </div>
             ) : null}
 
