@@ -4,16 +4,20 @@
 - 内联 CSS / JS / 字体 / 数据，双击即可打开（file://），无需服务器。
 - 同时写出一份 data/static-data.json 便于排查。
 
-用法：python -m pipeline.export_static
+用法：python -m pipeline.export_static [--allow-failed] [--clear-alert]
+
+排序确定化（W4-02）：所有数组型 payload 都带二级 tie-break（ts_code / sw_l1），
+所以除 meta.generated_at 外，同一份 mart 可导出可复现的字节内容。
 """
 from __future__ import annotations
 
-import base64
 import argparse
+import base64
 import json
 import math
 import os
 import re
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +30,10 @@ from .sector_roll import SQL_SECTOR_ROLL_ROWS, roll_params
 DIST = Path(os.getenv("ASHARE_RADAR_DIST_DIR", str(settings.ROOT / "frontend" / "dist"))).resolve()
 OUT = DIST / "ashare-radar.html"
 
+# 月度市场序列的投影必须与 API 对齐（W1-08）。API 当前返回同一组字段。
+MARKET_MONTH_COLUMNS = """month::VARCHAR AS trade_date, n_days, n_valid, breadth, ew_ret, cw_ret,
+    med_ret, csd, amount, hhi, top10_share, ew_ret_cum, hs300_ret_cum, hs300_n_days"""
+
 
 def _round(v):
     if isinstance(v, float):
@@ -35,6 +43,28 @@ def _round(v):
     if isinstance(v, list):
         return [_round(x) for x in v]
     return v
+
+
+def _version() -> str:
+    try:
+        with (settings.ROOT / "pyproject.toml").open("rb") as stream:
+            return str(tomllib.load(stream).get("project", {}).get("version") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _column_names(con, table: str) -> set[str]:
+    try:
+        return {d[0] for d in con.execute(f"SELECT * FROM {table} LIMIT 0").description}
+    except Exception:
+        return set()
 
 
 def build_payload(con) -> dict:
@@ -56,33 +86,66 @@ def build_payload(con) -> dict:
         "last_trade_date": str(base["d"]) if base["d"] else None,
         "n_days": base["n"],
         "n_stocks": rows("SELECT n_valid n FROM mart_market_day ORDER BY trade_date DESC LIMIT 1")[0]["n"] if base["n"] else 0,
+        "version": _version(),
         "source": "unknown",
         "sources": {},
+        "unavailable_datasets": [],
         "status": "unknown",
         "updated_at": None,
         "warnings": [],
         "alert": None,
+        "allow_failed": False,
+        "data_quality": {"partial_days": [], "n_partial_days": 0,
+                         "repaired_at": None, "history_gate": None},
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     alert_file = settings.META / "alert.json"
     if alert_file.exists():
         try:
-            meta["alert"] = json.loads(alert_file.read_text(encoding="utf-8"))
+            meta["alert"] = _read_json(alert_file)
             if isinstance(meta["alert"], dict):
                 meta["alert"].pop("log", None)
         except Exception:
             pass
     status_file = settings.META / "status.json"
     if status_file.exists():
-        try:
-            st = json.loads(status_file.read_text(encoding="utf-8"))
+        st = _read_json(status_file)
+        if isinstance(st, dict):
             meta["updated_at"] = st.get("updated_at")
             meta["status"] = st.get("status", "unknown")
             meta["warnings"] = st.get("warnings", [])
-            meta["sources"] = st.get("sources", {})
-            meta["source"] = ", ".join(sorted(set(meta["sources"].values()))) or "unknown"
-        except Exception:
-            pass
+            raw_sources = st.get("sources", {}) or {}
+            # 与 /api/meta 同口径：sources 只保留真实可用源，不可用数据集单列
+            # （W7-03/W9-22；契约见 _fix_20261127/修复计划与接口约定.md §2.5）。
+            meta["sources"] = {k: v for k, v in raw_sources.items()
+                               if v not in ("unavailable", "incomplete")}
+            used = sorted(set(meta["sources"].values()))
+            meta["source"] = ", ".join(used) or "unknown"
+            meta["unavailable_datasets"] = sorted(
+                k for k, v in raw_sources.items() if v in ("unavailable", "incomplete"))
+            if st.get("adj_degraded_days"):
+                meta["adj_degraded_days"] = st["adj_degraded_days"]
+
+    # 数据质量摘要（W11-01/W3-01）：partial 日清单来自 mart_market_day + 修复报告。
+    if "data_quality" in _column_names(con, "mart_market_day"):
+        partial = [r["trade_date"] for r in rows(
+            "SELECT trade_date FROM mart_market_day WHERE data_quality <> 'ok' "
+            "ORDER BY trade_date")]
+    else:
+        partial = []
+    repair = _read_json(settings.META / "history_repair.json") or {}
+    meta["data_quality"] = {
+        "partial_days": partial,
+        "n_partial_days": len(partial),
+        "repaired_at": repair.get("finished_at") or repair.get("generated_at"),
+        "repaired_days": len(repair.get("repaired") or []),
+        "history_gate": {
+            "pass": not partial,
+            "n_partial_days": len(partial),
+            "n_days": meta["n_days"],
+            "source": "mart_market_day.data_quality",
+        },
+    }
 
     market = rows("SELECT * FROM mart_market_day ORDER BY trade_date")
     sectors_rows = rows(
@@ -91,7 +154,7 @@ def build_payload(con) -> dict:
                med_ret, q10, q25, q75, q90, iqr, csd, amount, turnover_rate, limit_up_n
         FROM mart_sector_day
         WHERE trade_date >= (SELECT max(trade_date) - INTERVAL 3 YEAR FROM mart_sector_day)
-        ORDER BY trade_date, sw_l1
+        ORDER BY trade_date, ew_ret DESC NULLS LAST, sw_l1
         """
     )
     sectors: dict[str, list] = {}
@@ -99,6 +162,13 @@ def build_payload(con) -> dict:
         sectors.setdefault(r["trade_date"], []).append(r)
 
     monthly = rows(
+        f"""
+        SELECT {MARKET_MONTH_COLUMNS}
+        FROM mart_market_month ORDER BY month
+        """
+    )
+
+    sector_monthly = rows(
         """
         SELECT month::VARCHAR AS month, sw_l1, n_days, breadth, ew_ret, cw_ret, iqr, amount, ew_ret_cum
         FROM mart_sector_month ORDER BY month, sw_l1
@@ -107,7 +177,7 @@ def build_payload(con) -> dict:
 
     rotation = rows(
         """
-        SELECT trade_date::VARCHAR AS trade_date, rotation_intensity
+        SELECT trade_date::VARCHAR AS trade_date, rotation_intensity, n_sectors
         FROM mart_rotation_day
         WHERE trade_date >= (SELECT max(trade_date) - INTERVAL 3 YEAR FROM mart_rotation_day)
         ORDER BY trade_date
@@ -125,7 +195,7 @@ def build_payload(con) -> dict:
 
     sector_ranks = rows(
         """
-        SELECT trade_date::VARCHAR AS trade_date, sw_l1, rank20
+        SELECT trade_date::VARCHAR AS trade_date, sw_l1, rank20, ret20
         FROM mart_sector_rank
         WHERE trade_date >= (SELECT max(trade_date) - INTERVAL 1 YEAR FROM mart_sector_rank)
         ORDER BY trade_date, sw_l1
@@ -136,6 +206,10 @@ def build_payload(con) -> dict:
     # amount 来自 mart_sector_day（单位：元），只作为气泡面积/成交额展示用，不进新表。
     has_sector_roll = table_exists(con, "mart_sector_roll")
     sector_roll = rows(SQL_SECTOR_ROLL_ROWS, roll_params()) if has_sector_roll else None
+    if sector_roll is not None:
+        n_by_day = {r["trade_date"]: r["n_sectors"] for r in rotation}
+        for row in sector_roll:
+            row["n_sectors"] = n_by_day.get(row["trade_date"])
 
     contrib_rows = rows(
         """
@@ -152,7 +226,8 @@ def build_payload(con) -> dict:
         ),
         r AS (
             SELECT *, weight * ret AS contrib,
-                   row_number() OVER (PARTITION BY trade_date ORDER BY abs(weight * ret) DESC) AS rn
+                   row_number() OVER (PARTITION BY trade_date
+                                      ORDER BY abs(weight * ret) DESC, ts_code) AS rn
             FROM w
         )
         SELECT trade_date::VARCHAR AS trade_date, ts_code, name, sw_l1, ret, weight, contrib
@@ -182,6 +257,18 @@ def build_payload(con) -> dict:
         WHERE trade_date = (SELECT max(trade_date) FROM feat_stock) AND NOT is_new_stock
         """
     )[0]
+    # 分箱只覆盖 ±11%，区间外样本不绘制、只计数。四个计数放在 distribution 顶层，
+    # 与 API /api/distribution/<d> 结构一致（W6-03/W9-04，D3 契约）。
+    dist_coverage = rows(
+        """
+        SELECT count(*) AS n_total,
+               count(*) FILTER (WHERE ret BETWEEN -0.11 AND 0.11) AS n_binned,
+               count(*) FILTER (WHERE ret < -0.11) AS n_excluded_lt,
+               count(*) FILTER (WHERE ret > 0.11)  AS n_excluded_gt
+        FROM feat_stock
+        WHERE trade_date = (SELECT max(trade_date) FROM feat_stock) AND NOT is_new_stock
+        """
+    )[0]
 
     stocks = rows(
         """
@@ -190,29 +277,24 @@ def build_payload(con) -> dict:
                is_limit_up, is_limit_down
         FROM feat_stock
         WHERE trade_date = (SELECT max(trade_date) FROM feat_stock) AND NOT is_new_stock
-        ORDER BY ret DESC
+        ORDER BY ret DESC, ts_code
         """
     )
     watch_pool = rows(
         """
         SELECT *
         FROM mart_stock_latest
+        ORDER BY ts_code
         """
     )
 
-    quality = {}
-    qfile = settings.META / "quality" / "latest.json"
-    if qfile.exists():
-        try:
-            quality = json.loads(qfile.read_text(encoding="utf-8"))
-        except Exception:
-            quality = {}
+    quality = _read_json(settings.META / "quality" / "latest.json") or {}
 
     top_codes = [
         r["ts_code"]
         for r in rows(
             "SELECT ts_code FROM feat_stock WHERE trade_date = (SELECT max(trade_date) FROM feat_stock) "
-            "ORDER BY amount DESC LIMIT 60"
+            "ORDER BY amount DESC, ts_code LIMIT 60"
         )
     ]
     sample_codes = ["600519.SH", "300750.SZ", "688981.SH", "600036.SH", "002594.SZ", "300059.SZ"]
@@ -220,7 +302,7 @@ def build_payload(con) -> dict:
     ph = ",".join(["?"] * len(series_codes))
     series_rows = rows(
         f"""
-        SELECT ts_code, trade_date::VARCHAR AS trade_date, open, high, low, close, vol
+        SELECT ts_code, trade_date::VARCHAR AS trade_date, open, high, low, close, vol, adj_factor
         FROM feat_stock
         WHERE ts_code IN ({ph})
           AND trade_date >= (SELECT max(trade_date) - INTERVAL 190 DAY FROM feat_stock)
@@ -228,36 +310,54 @@ def build_payload(con) -> dict:
         """,
         series_codes,
     )
+    # P1-6：K 线改为前复权（按窗口内最后一个**非空** adj_factor 归一，与 /api/stock 一致），
+    # 数组 [date, o_adj, h_adj, l_adj, c_adj, vol, adj_factor]。
     stock_series: dict[str, list] = {}
     for r in series_rows:
-        stock_series.setdefault(r["ts_code"], []).append(
-            [r["trade_date"], r["open"], r["high"], r["low"], r["close"], r["vol"]]
-        )
+        stock_series.setdefault(r["ts_code"], []).append(r)
+    series_payload: dict[str, list] = {}
+    for code, bars in stock_series.items():
+        norm_factor = None
+        for bar in bars:
+            factor = bar.get("adj_factor")
+            if factor is not None and math.isfinite(factor) and factor > 0:
+                norm_factor = factor
+        if not norm_factor:
+            norm_factor = 1.0
+        rows_out = []
+        for bar in bars:
+            factor = bar.get("adj_factor")
+            scale = (factor / norm_factor) if factor is not None and math.isfinite(factor) else 1.0
+            rows_out.append([bar["trade_date"],
+                             bar["open"] * scale if bar["open"] is not None else None,
+                             bar["high"] * scale if bar["high"] is not None else None,
+                             bar["low"] * scale if bar["low"] is not None else None,
+                             bar["close"] * scale if bar["close"] is not None else None,
+                             bar["vol"], bar["adj_factor"]])
+        series_payload[code] = rows_out
 
     updates = []
     for p in sorted(settings.META.glob("update_*.json"), reverse=True)[:30]:
-        try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-            updates.append(
-                {
-                    "date": p.stem.replace("update_", ""),
-                    "status": d.get("status"),
-                    "days": len(d.get("days", [])),
-                    "duration": d.get("duration_sec"),
-                    "warnings": len(d.get("warnings", [])),
-                }
-            )
-        except Exception:
+        d = _read_json(p)
+        if not isinstance(d, dict):
             continue
+        updates.append(
+            {
+                "date": p.stem.replace("update_", ""),
+                "status": d.get("status"),
+                "days": len(d.get("days", [])),
+                "duration": d.get("duration_sec"),
+                "warnings": len(d.get("warnings", [])),
+            }
+        )
 
     reconcile = {}
     rfile = settings.META / "reconcile.json"
     if rfile.exists():
-        try:
-            rj = json.loads(rfile.read_text(encoding="utf-8"))
-            reconcile = {k: rj.get(k) for k in ("generated_at", "stocks", "pairs", "mae_pp", "p95_pp", "max_pp", "share_gt_0_1pp")}
-        except Exception:
-            reconcile = {}
+        rj = _read_json(rfile)
+        if isinstance(rj, dict):
+            reconcile = {k: rj.get(k) for k in ("generated_at", "days", "stocks", "pairs",
+                                                "mae_pp", "p95_pp", "max_pp", "share_gt_0_1pp")}
 
     pe_rows = rows(
         f"""
@@ -292,26 +392,32 @@ def build_payload(con) -> dict:
         "updates": updates,
         "reconcile": reconcile,
         "market": market,
-        "market_monthly": rows("SELECT month::VARCHAR AS trade_date, * EXCLUDE(month) FROM mart_market_month ORDER BY month"),
+        "market_monthly": monthly,
         "sectors": sectors,
-        "sector_monthly": monthly,
+        "sector_monthly": sector_monthly,
         "rotation": rotation,
         "sector_ranks": sector_ranks,
         "sector_roll": sector_roll,
         "limit_quality": limit_quality,
         "contrib": contrib,
-        "distribution": {meta["last_trade_date"]: {"bins": dist_rows, "stats": dist_stats}},
+        "distribution": {meta["last_trade_date"]: {
+            "bins": dist_rows, "stats": dist_stats,
+            "n_total": dist_coverage["n_total"],
+            "n_binned": dist_coverage["n_binned"],
+            "n_excluded_lt": dist_coverage["n_excluded_lt"],
+            "n_excluded_gt": dist_coverage["n_excluded_gt"],
+        }},
         "stocks": stocks,
         "watch_pool": watch_pool,
-        "stock_series": stock_series,
+        "stock_series": series_payload,
         "pe_percentile": pe_percentile,
         "coverage": {
             "stocks": "latest day only",
-            "distribution": "latest day only",
+            "distribution": "latest day only; +/-11% returns excluded from bins (counted in stats)",
             "sectors": "last three years",
             "sector_roll": "last 250 trading days" if has_sector_roll else "unavailable: rebuild marts to export",
             "contributors": "last 130 trading days",
-            "stock_series": "top-60 and sample stocks, last 190 calendar days",
+            "stock_series": "top-60 and sample stocks, last 190 calendar days, qfq adjusted by last adj_factor in window",
         },
     }
     return _round(payload)
@@ -383,6 +489,8 @@ def _export(allow_failed: bool, clear_alert: bool = False) -> None:
         payload = build_payload(con)
     if clear_alert:
         payload["meta"]["alert"] = None
+    if allow_failed:
+        payload["meta"]["allow_failed"] = True
     quality = payload.get("quality", {})
     if not payload["meta"]["n_days"]:
         raise RuntimeError("cannot export empty market data")
@@ -402,13 +510,24 @@ def _export(allow_failed: bool, clear_alert: bool = False) -> None:
     html = _inline_assets(index, assets)
     data_script = f"<script>window.__BL_DATA__={data_json};</script>"
     html = html.replace("</head>", data_script + "</head>", 1) if "</head>" in html else data_script + html
-    atomic_write_text(settings.DATA / "static-data.json", data_json)
-    atomic_write_text(OUT, html)
+    # 两个产物成对替换：HTML 写失败时把 static-data.json 恢复为旧内容（W3-16/W4-07）。
+    json_path = settings.DATA / "static-data.json"
+    previous_json = json_path.read_bytes() if json_path.exists() else None
+    atomic_write_text(json_path, data_json)
+    try:
+        atomic_write_text(OUT, html)
+    except BaseException:
+        if previous_json is not None:
+            atomic_write_text(json_path, previous_json.decode("utf-8"))
+        raise
     size = OUT.stat().st_size / 1e6
     print(f"[export] {OUT}  {size:.1f} MB  (json {len(data_json)/1e6:.1f} MB)")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--allow-failed", action="store_true", help="re-export existing marts with a failure warning")
-    main(parser.parse_args().allow_failed)
+    parser.add_argument("--allow-failed", action="store_true",
+                        help="re-export existing marts with a failure warning (frontend shows the alert)")
+    parser.add_argument("--clear-alert", action="store_true", help="omit the current alert from the payload")
+    args = parser.parse_args()
+    main(args.allow_failed, args.clear_alert)

@@ -209,13 +209,17 @@ def _run(start: str, end: str, db_path: str | None = None) -> dict:
 def run(start: str, end: str, db_path: str | None = None) -> dict:
     with publish_lock():
         try:
-            return _run(start, end, db_path)
+            result = _run(start, end, db_path)
         except Exception:
             from . import alerts
             alerts.write("bootstrap", "API建库未完成，请检查本机日志并重试同一区间")
             atomic_write_json(settings.META / "status.json", {
                 "status": "failed", "warnings": ["bootstrap incomplete; retry the same date interval"]})
             raise
+        # A completed bootstrap is a clean state: drop any stale failure alert.
+        from . import alerts
+        alerts.clear()
+        return result
 
 
 if __name__ == "__main__":

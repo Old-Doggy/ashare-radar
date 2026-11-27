@@ -31,11 +31,15 @@ def _refresh() -> dict:
             "rows": {"daily": gate["rows"]},
             "coverage": coverage,
             "sources": previous.get("sources", {}),
+            "sources_by_date": previous.get("sources_by_date", {}),
+            "adj_degraded_days": previous.get("adj_degraded_days", []),
             "gates": [{"id": g["id"], "pass": g["pass"]} for g in gate["gates"]],
             "warnings": previous.get("warnings", []),
             "duration_sec": None,
             "message": "",
             "failure_stage": previous.get("failure_stage"),
+            "not_applicable": gate.get("not_applicable", []),
+            "skipped_gates": gate.get("skipped", []),
         }
         # A failed fetch cannot become successful merely by rechecking yesterday.
         if previous.get("status") == "failed":

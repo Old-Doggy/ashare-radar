@@ -55,7 +55,10 @@ def run(rebuild=False, target=None, source="auto"):
             except (ValueError, OSError):
                 status = {}
             status["status"] = "failed"
-            status["failure_stage"] = stage
+            # W3-15: keep the first failing stage (the diagnosis of a failed
+            # update must not be overwritten by a later quality/marts rebuild).
+            status.setdefault("failure_stage", stage)
+            status["last_failure_stage"] = stage
             atomic_write_json(status_path, status)
             raise
 

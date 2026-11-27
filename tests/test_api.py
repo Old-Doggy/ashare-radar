@@ -47,9 +47,10 @@ def test_distribution(client):
 def test_stocks(client):
     r = client.get("/api/stocks?date=2026-05-22&limit=50")
     assert r.status_code == 200
-    rows = r.get_json()
-    assert 0 < len(rows) <= 50
-    assert "ret" in rows[0]
+    payload = r.get_json()
+    assert 0 < len(payload["rows"]) <= 50
+    assert payload["total"] == 6
+    assert "ret" in payload["rows"][0]
 
 
 def test_sectors(client):
@@ -61,7 +62,8 @@ def test_sectors(client):
 def test_watchlist_roundtrip(client):
     client.delete("/api/watchlist/000001.SZ")
     assert client.post("/api/watchlist", json={"ts_code": "000001.SZ"}).status_code == 200
-    rows = client.get("/api/watchlist").get_json()
+    # GET 持仓是隐私面：必须带自定义头（见 tests/test_api_hardening.py）
+    rows = client.get("/api/watchlist", headers={"X-Requested-With": "ashare-radar"}).get_json()
     assert any(r["ts_code"] == "000001.SZ" for r in rows)
     assert client.delete("/api/watchlist/000001.SZ").status_code == 200
 
@@ -140,7 +142,7 @@ def test_sector_roll_missing_table_returns_rebuild_status(client, mutable_lake):
     response = client.get("/api/sectors/roll")
     assert response.status_code == 409
     assert response.get_json()["error"] == "sector_roll_missing"
-    assert client.get("/api/sectors").status_code == 200
+    assert client.get("/api/sectors?date=2026-05-22").status_code == 200
 
 
 def test_sector_roll_end_only_can_query_before_the_latest_250_dates(client, mutable_lake):

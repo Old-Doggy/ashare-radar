@@ -21,7 +21,7 @@ from .io_utils import atomic_write_json, atomic_write_text
 
 
 def main(stocks: int = 30, days: int = 3) -> dict:
-    with session() as con:
+    with session(read_only=True) as con:
         latest = con.execute("SELECT max(trade_date) FROM feat_stock").fetchall()[0][0]
         dates = [
             r[0]
@@ -73,7 +73,9 @@ def main(stocks: int = 30, days: int = 3) -> dict:
 
     m = ts.merge(aks, on=["ts_code", "trade_date"], how="inner")
     if m.empty:
-        out = {"generated_at": datetime.now().isoformat(timespec="seconds"), "n": 0, "error": "no overlap"}
+        out = {"generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+               "stocks": len(sample), "days": [str(d) for d in dates], "pairs": 0,
+               "error": "no overlap", "verdict": "unverifiable"}
     else:
         m["diff"] = (m.pct_chg - m.ak_pct).abs()
         out = {
@@ -85,6 +87,7 @@ def main(stocks: int = 30, days: int = 3) -> dict:
             "p95_pp": round(float(m["diff"].quantile(0.95)), 4),
             "max_pp": round(float(m["diff"].max()), 4),
             "share_gt_0_1pp": round(float((m["diff"] > 0.1).mean()), 4),
+            "verdict": "pass" if float(m["diff"].mean()) < 0.05 else "divergent",
             "worst": m.sort_values("diff", ascending=False).head(5)[["ts_code", "trade_date", "pct_chg", "ak_pct", "diff"]].assign(
                 trade_date=lambda x: x.trade_date.astype(str)
             ).to_dict("records"),
@@ -94,11 +97,13 @@ def main(stocks: int = 30, days: int = 3) -> dict:
     md = f"""# 源间对账（Tushare vs akshare）
 
 - 生成时间：{out.get('generated_at')}
-- 样本：{out.get('stocks')} 只股票 × {len(out.get('days', []))} 个交易日，共 {out.get('pairs', 0)} 对
+- 样本：{out.get('stocks')} 只股票 × {len(out.get('days', []))} 个交易日（{', '.join(out.get('days') or []) or '—'}），共 {out.get('pairs', 0)} 对
 - MAE：{out.get('mae_pp', '—')} pp ｜ P95：{out.get('p95_pp', '—')} pp ｜ 最大：{out.get('max_pp', '—')} pp
 - 差异 > 0.1pp 的占比：{out.get('share_gt_0_1pp', '—')}
+- 结论：{out.get('verdict', '—')}
 
-结论：{'无重合记录，无法核验源间差异' if not out.get('pairs') else '两源在抽样范围内一致（MAE < 0.05pp）' if out.get('mae_pp', 9) < 0.05 else '存在源间差异，页面需标注'}。
+> n=0（无重合记录）表示**无法核验**，不构成“通过”。本对账为一次性抽样，
+> 只覆盖上述样本日；页面需同时展示生成时间与样本日，避免用陈旧快照代表当前库。
 
 > 口径：akshare 取不复权日线的“涨跌幅”，Tushare 取 `daily.pct_chg`；仅抽样校验，不作为主数据源。
 """

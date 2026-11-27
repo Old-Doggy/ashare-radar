@@ -147,31 +147,6 @@ def fetch(pro, ds: str, day: str) -> pd.DataFrame:
     raise ValueError(ds)
 
 
-def quality(con: duckdb.DuckDBPyConnection, day: str) -> tuple[bool, list[str]]:
-    msgs: list[str] = []
-    d = datetime.strptime(day, "%Y%m%d").date()
-    q = con.execute(
-        """
-        SELECT count(*) n,
-               count(*) FILTER (WHERE circ_mv IS NOT NULL) n_mv,
-               count(*) FILTER (WHERE adj_factor IS NOT NULL) n_adj,
-               count(*) FILTER (WHERE abs(pct_chg) > 21) n_bad
-        FROM core_stock_day WHERE trade_date = ?
-        """,
-        [d],
-    ).fetchall()[0]
-    n, n_mv, n_adj, n_bad = q
-    if n < 3000:
-        msgs.append(f"row count too low: {n}")
-    if n and n_mv / n < 0.95:
-        msgs.append(f"circ_mv coverage low: {n_mv / n:.2%}")
-    if n and n_adj / n < 0.95:
-        msgs.append(f"adj_factor coverage low: {n_adj / n:.2%}")
-    if n and n_bad / n > 0.01:
-        msgs.append(f"abnormal |pct_chg|>21%: {n_bad / n:.2%}")
-    return (len(msgs) == 0), msgs
-
-
 def insert(con: duckdb.DuckDBPyConnection, ds: str, df: pd.DataFrame, day: str) -> int:
     if df is None or df.empty:
         return 0
@@ -282,11 +257,27 @@ def _checkpoint(con, day, ds, src):
         [datetime.strptime(day, "%Y%m%d").date(), ds, src])
 
 
+def _peek_open_days(pro, con, end: str) -> list[str]:
+    """Read the upstream calendar without writing it (dry-run only, W3-11)."""
+    first = con.execute("SELECT min(cal_date) FROM core_trade_cal").fetchone()[0]
+    start = first or settings.BOOTSTRAP_START.replace("-", "")
+    df = pro.trade_cal(exchange="SSE", start_date=str(start), end_date=str(end))
+    if df is None or df.empty:
+        raise RuntimeError("trade calendar unavailable")
+    fresh = set(df.loc[df["is_open"] == 1, "cal_date"].astype(str))
+    local = {r[0] for r in con.execute(
+        "SELECT cal_date FROM core_trade_cal WHERE is_open=1").fetchall()}
+    return sorted(fresh | local)
+
+
 def _run(target=None, dry=False, source="auto"):
     from .build_marts import SQL_VIEW
     from .db import table_exists
     started = time.time()
-    report = {"status": "ok", "days": [], "warnings": [], "sources_by_date": {}}
+    report = {"status": "ok", "days": [], "warnings": [], "sources_by_date": {},
+              "pending_new": [], "replay": [], "adj_degraded_days": [],
+              "run_id": datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%dT%H%M%S%z"),
+              "generated_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")}
     end = target or _today()
     datetime.strptime(end, "%Y%m%d")
     if end > _today():
@@ -305,12 +296,20 @@ def _run(target=None, dry=False, source="auto"):
                 report["warnings"].append("Tushare unavailable; only verified current-day fallback is possible")
         if pro is not None and not dry:
             ensure_calendar(pro, con, end)
-        calendar = open_days(con, start, end)
+        if pro is not None and dry:
+            # dry-run must stay read-only but still see new upstream trading days.
+            calendar = [d for d in _peek_open_days(pro, con, end) if start <= d <= end]
+        else:
+            calendar = open_days(con, start, end)
         if pro is None:
-            verified = [d for d in ak_fb.trading_days() if d <= end]
-            if end not in verified:
-                raise RuntimeError("requested date is not a verified trading day")
-            if not dry:
+            if dry:
+                # No upstream calendar: never touch the network in a dry run.
+                report["warnings"].append(
+                    "dry-run without Tushare: pending is computed from the local calendar only")
+            else:
+                verified = [d for d in ak_fb.trading_days() if d <= end]
+                if end not in verified:
+                    raise RuntimeError("requested date is not a verified trading day")
                 # The new day must exist locally too: weights, IPO age and
                 # streak continuity all use this calendar during mart rebuild.
                 con.executemany("""INSERT INTO core_trade_cal
@@ -318,7 +317,7 @@ def _run(target=None, dry=False, source="auto"):
                     (SELECT 1 FROM core_trade_cal WHERE cal_date=?)""",
                     [(d, datetime.strptime(d, "%Y%m%d").date(),
                       verified[i-1] if i else "", d) for i, d in enumerate(verified)])
-            calendar = [end]
+                calendar = [end]
         loaded = {r[0].strftime("%Y%m%d") for r in con.execute(
             "SELECT DISTINCT trade_date FROM core_stock_day").fetchall()}
         # Replay recent dates for T+1 datasets and corrections, plus every daily hole.
@@ -329,8 +328,11 @@ def _run(target=None, dry=False, source="auto"):
                 """SELECT DISTINCT trade_date FROM core_dataset_checkpoint WHERE (NOT completed OR source='akshare')
                 AND dataset IN ('daily','daily_basic','adj_factor','stk_limit') AND trade_date <= ?::DATE""",
                 [datetime.strptime(end, "%Y%m%d").date()]).fetchall()})
-        report.update({"from": last, "to": end, "pending": days})
-        log(f"last={last} pending={len(days)} days")
+        report.update({"from": last, "to": end, "pending": days,
+                       "pending_new": [d for d in days if d not in loaded],
+                       "replay": [d for d in days if d in loaded],
+                       "dry_run": bool(dry)})
+        log(f"last={last} pending={len(days)} new={len(report['pending_new'])} replay={len(report['replay'])}")
         if dry:
             report["duration_sec"] = round(time.time() - started, 1)
             return report
@@ -378,7 +380,9 @@ def _run(target=None, dry=False, source="auto"):
                             ON CONFLICT(trade_date,dataset) DO UPDATE SET completed=FALSE""",
                             [datetime.strptime(day, "%Y%m%d").date(), ds])
                         core_required = ds in ("daily", "daily_basic", "adj_factor", "stk_limit")
-                        if source == "tushare" or core_required:
+                        # Optional datasets (limit_list_d/moneyflow/margin) must not fail a
+                        # run just because the account lacks permission (W3-19).
+                        if core_required:
                             raise RuntimeError(f"{day} required dataset {ds} unavailable")
                         continue
                     affected[ds] = insert(con, ds, df, day)
@@ -462,11 +466,16 @@ def _run(target=None, dry=False, source="auto"):
                 update_indices(pro, con, hole, end)
         con.execute("CHECKPOINT")
     report["sources"] = used
+    # akshare 降级日：adj_factor 顺延会在除权日产生偏差，必须在 status/payload 标注（W3-07）。
+    report["adj_degraded_days"] = sorted(
+        d for d, src in report["sources_by_date"].items() if src.get("adj_factor") == "akshare")
     report["duration_sec"] = round(time.time() - started, 1)
     status = {"status": report["status"], "last_trade_date": max(
         [d["date"] for d in report["days"]], default=last),
         "updated_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
-        "sources": used, "warnings": report["warnings"], "duration_sec": report["duration_sec"]}
+        "sources": used, "sources_by_date": report["sources_by_date"],
+        "adj_degraded_days": report["adj_degraded_days"],
+        "warnings": report["warnings"], "duration_sec": report["duration_sec"]}
     atomic_write_json(settings.META / "status.json", status)
     atomic_write_json(settings.META / f"update_{_today()}.json", report)
     return report
@@ -491,6 +500,9 @@ if __name__ == "__main__":
             if not args.dry_run:
                 alerts.write("update", "quality gates or required dataset failed")
             raise SystemExit(2)
+        if not args.dry_run:
+            # A standalone successful update is a complete refresh: clear stale alert.
+            alerts.clear()
     except Exception:
         if not args.dry_run:
             alerts.write("update", "数据拉取未完成；请检查本机更新日志")

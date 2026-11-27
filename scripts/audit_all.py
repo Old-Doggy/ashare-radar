@@ -1,7 +1,17 @@
-"""全量数据审计：从原始表独立重算，与 mart / 静态 payload / akshare 交叉验证。
+"""数据审计：派生表重算 + 全历史完整性 + 与 mart / 静态 payload / akshare 交叉验证。
 
-用法：python scripts/audit_all.py [--date 2026-11-10] [--samples 20] [--lake data/lake.duckdb]
+独立性说明（W11-09/W12-09，务必如实理解）：
+- 市场/行业指标是从 `feat_stock`（同一条管线的派生层）重算的**派生表重算**，
+  不是从 `core_*` 原始表另写一套独立实现；它能发现聚合/投影错误，但不能
+  独立证明 build_marts 的派生逻辑本身正确。
+- 跨源对账（akshare）只覆盖抽样股票与**指定单日**；网络不可用时记为 skip，
+  skip 不是 pass——报告 verdict 会写明 `pass_with_skips`。
+- 全历史完整性（gate15 同口径）是独立 SQL 实现，历史部分日会被计入 FAIL。
+- 输出写到 `<lake 所在目录>/meta/`，在数据库副本上运行不会污染生产 meta。
+
+用法：python scripts/audit_all.py [--date 2026-11-26] [--samples 20] [--lake data/lake.duckdb] [--offline]
 输出：<lake 所在目录>/meta/audit_report.md、sector_roll.json，控制台 PASS/FAIL 表。
+退出码：0 = 无 FAIL；1 = 有 FAIL。skip 不改变退出码，但 verdict 不是完整通过。
 """
 from __future__ import annotations
 
@@ -48,6 +58,7 @@ def skip(item: str, reason: str) -> None:
 
 
 def audit_market(con, day: str) -> None:
+    """从 feat_stock 派生层重算单日市场指标（非 core_* 独立实现，见模块说明）。"""
     m = con.execute(
         "SELECT * FROM mart_market_day WHERE trade_date = ?", [day]
     ).fetchdf().iloc[0]
@@ -94,7 +105,7 @@ def audit_market(con, day: str) -> None:
             WHERE f.trade_date = ? AND NOT f.is_new_stock
         ),
         w AS (SELECT *, prev_cap / sum(prev_cap) OVER () AS wt FROM f WHERE prev_cap > 0 AND isfinite(prev_cap)),
-        r AS (SELECT *, row_number() OVER (ORDER BY prev_cap DESC) rn FROM w)
+        r AS (SELECT *, row_number() OVER (ORDER BY prev_cap DESC, ts_code) rn FROM w)
         SELECT sum(wt * ret) cw,
                sum(wt * wt) * 10000 hhi,
                sum(wt * ret) FILTER (WHERE rn <= 10) top10_pp,
@@ -332,7 +343,9 @@ def audit_limit_method(con, day: str = "2026-05-22") -> None:
     ).fetchdf()
     if len(mrow):
         r = mrow.iloc[0]
-        check("5%限制涨停家数（非ST身份）", st_n, r.limit_up_5pct_n, 0, note=f"{day}")
+        # 一致性检查（不是独立性检查）：st_n 与 limit_up_5pct_n 同由 up_limit 价格档派生，
+        # 只能验证 mart 聚合与明细自洽，不能作为 5% 档正确性的外部证据。
+        check("5%档与明细自洽（同一 up_limit 来源，非独立证据）", st_n, r.limit_up_5pct_n, 0, note=f"{day}")
         check("非5%涨停与官方差异", official, r.limit_up_non5pct_n, max(2, round(official * 0.03)))
         broken = con.execute(
             "SELECT count(*) FROM core_limit_event WHERE trade_date = ? AND is_broken", [day]
@@ -572,6 +585,32 @@ def _write_sector_roll_audit(meta_dir: Path, report: dict) -> None:
     print(f"[written] {path}")
 
 
+def _independent_sector_roll_rows(con):
+    """独立重算 payload.sector_roll 的投影（不复用 pipeline.sector_roll 的生产 SQL）。
+
+    窗口：mart_sector_roll 中最近 250 个交易日；字段：滚动列 + mart_sector_day.amount
+    （非负有限值四舍五入到元后转 BIGINT，否则 NULL）。这正是 payload 的字段与过滤语义。
+    """
+    roll = con.execute(
+        """SELECT trade_date, sw_l1, ret_r5, ret_r10, ret_r20, br_r5, br_r10, br_r20,
+                  rank_r5, rank_r10, rank_r20
+           FROM mart_sector_roll"""
+    ).fetchall()
+    amount = {(d, s): a for d, s, a in con.execute(
+        "SELECT trade_date, sw_l1, amount FROM mart_sector_day").fetchall()}
+    keep = set(sorted({r[0] for r in roll}, reverse=True)[:250])
+    out = []
+    for row in sorted((r for r in roll if r[0] in keep), key=lambda r: (r[0], r[1])):
+        value = amount.get((row[0], row[1]))
+        if value is None or not math.isfinite(value) or value < 0:
+            rounded = None
+        else:
+            # 与 DuckDB round() 一致：非负数四舍五入（Python round 是银行家舍入）
+            rounded = int(math.floor(value + 0.5))
+        out.append((*row, rounded))
+    return out
+
+
 def audit_payload(con, day: str, p: Path | None = None) -> None:
     if p is None:
         p = ROOT / "data" / "static-data.json"
@@ -588,7 +627,6 @@ def audit_payload(con, day: str, p: Path | None = None) -> None:
     check("payload 个股数", int(m.n_valid), len(d["stocks"]), 0)
     print(f"  [info] payload stocks={len(d['stocks'])}, sectors={len(d['sectors'])}, rotation={len(d.get('rotation', []))}")
     from pipeline.db import table_exists
-    from pipeline.sector_roll import SQL_SECTOR_ROLL_ROWS, roll_params
 
     exported = d.get("sector_roll")
     if exported is None:
@@ -597,19 +635,38 @@ def audit_payload(con, day: str, p: Path | None = None) -> None:
     if not table_exists(con, "mart_sector_roll"):
         check("payload matches an existing mart_sector_roll", True, False, kind="bool")
         return
-    cursor = con.execute(SQL_SECTOR_ROLL_ROWS, roll_params())
-    fields = [column[0] for column in cursor.description]
-    stored = cursor.fetchall()
-    check("payload sector_roll row count", len(stored), len(exported))
+    expected = _independent_sector_roll_rows(con)
+    check("payload sector_roll row count", len(expected), len(exported))
+    fields = ["trade_date", "sw_l1", "ret_r5", "ret_r10", "ret_r20", "br_r5", "br_r10",
+              "br_r20", "rank_r5", "rank_r10", "rank_r20", "amount"]
     mismatches = 0
-    for actual, values in zip(exported, stored):
-        expected = dict(zip(fields, values))
-        expected["trade_date"] = expected["trade_date"].isoformat()
-        for key, value in expected.items():
-            if isinstance(value, float):
+    for actual, values in zip(exported, expected):
+        for key, value in zip(fields, values):
+            if key == "trade_date":
+                value = str(value)[:10]
+            elif isinstance(value, float):
                 value = round(value, 6)
             mismatches += key not in actual or actual[key] != value
-    check("payload sector_roll field mismatches", 0, mismatches)
+    check("payload sector_roll field mismatches（独立 Python 重算投影）", 0, mismatches)
+
+
+def audit_history_completeness(con) -> None:
+    """独立实现（不复用 quality_gates）的历史部分日检查，原始审核口径：含当日的 ±10 中位数。
+
+    任何非零值都意味着交付库仍含部分交易日，必须先用 repair_history 修复再发布。
+    """
+    rows = con.execute(
+        """
+        WITH counts AS (SELECT trade_date, count(*) n FROM core_stock_day GROUP BY 1),
+        nearby AS (SELECT *, median(n) OVER (ORDER BY trade_date
+            ROWS BETWEEN 10 PRECEDING AND 10 FOLLOWING) typical FROM counts)
+        SELECT strftime(trade_date, '%Y-%m-%d'), n, typical FROM nearby
+        WHERE n < 0.85 * typical ORDER BY trade_date
+        """
+    ).fetchall()
+    worst = "; ".join(f"{d}:{n}/{int(t)}" for d, n, t in rows[:3]) or "none"
+    check("全历史不完整交易日数（±10 中位数 n<0.85*median）", 0, len(rows), 0,
+          note=f"worst 3: {worst}")
 
 
 def main() -> None:
@@ -657,12 +714,17 @@ def main() -> None:
     audit_payload(con, latest_day, lake.parent / "static-data.json")
     print("[8] 行业滚动指标（mart_sector_roll）")
     check_sector_roll(con, lake.parent / "meta")
+    print("[9] 全历史完整性（部分交易日）")
+    audit_history_completeness(con)
     con.close()
 
     passed = [r for r in RESULTS if r["ok"] is True]
     fails = [r for r in RESULTS if r["ok"] is False]
     skips = [r for r in RESULTS if r["ok"] is None]
+    verdict = "fail" if fails else ("pass_with_skips" if skips else "pass")
     print(f"\n== 结果：{len(passed)} 通过 / {len(fails)} 失败 / {len(skips)} 跳过（共 {len(RESULTS)}）==")
+    print(f"== verdict：{verdict}"
+          + ("（跳过项不计入通过，外部对账缺失时不能宣称完整通过）" if skips else "") + " ==")
     for r in fails:
         print("  FAIL", r["item"], "expected", r["expected"], "actual", r["actual"], "diff", r["diff"], r["note"])
     for r in skips:
@@ -672,7 +734,12 @@ def main() -> None:
         f"# 数据审计报告 · {day}",
         "",
         f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 审计库：{lake}（只读连接）",
+        f"- 范围：单日指标重算 = {day}；全历史完整性 = 全部交易日；跨源对账 = 抽样单日（akshare，可缺失）",
         f"- 样本：{len(RESULTS)} 项检查 · {len(passed)} 通过 · {len(fails)} 失败 · {len(skips)} 跳过",
+        f"- verdict：**{verdict}**"
+        + ("（skip 不计入通过，跨源对账缺失时不构成完整通过）" if skips else ""),
+        "- 独立性：市场/行业指标为 `feat_stock` 派生层重算（同管线一层），非 core_* 独立实现。",
         "",
         "| 检查项 | 期望/原始 | 实际/mart | 差异 | 结果 | 备注 |",
         "|---|---:|---:|---:|:--:|---|",

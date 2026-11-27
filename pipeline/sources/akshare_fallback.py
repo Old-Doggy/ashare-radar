@@ -26,7 +26,8 @@ def _ts_code(code: str) -> str:
 def _rate(ts_code: str, name: str) -> float:
     if ts_code.endswith(".BJ"):
         base = 0.30
-    elif ts_code.startswith(("688", "300", "301")):
+    elif ts_code.startswith(("688", "689", "300", "301")):
+        # 689 是科创板 CDR，与 688 同为 20% 档（W3-10）。
         base = 0.20
     else:
         base = 0.10

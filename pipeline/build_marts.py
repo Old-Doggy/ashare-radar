@@ -2,6 +2,13 @@
 
 口径全部集中在 SQL 里，任何页面不得自行重算。
 所有金额统一换算为「元」：daily.amount 原始单位千元，moneyflow 原始单位万元。
+
+数据质量契约（v0.4.3）：
+- `mart_market_day` 末尾追加 `weight_coverage / n_valid_ratio / data_quality /
+  margin_n_exchanges / n_extreme_ret`；
+- `data_quality='partial'` 的交易日表示样本/权重覆盖不足，依赖加权与涨跌停的列
+  一律输出 NULL（不做小数样本重新归一）；
+- 两融合计仅含 SSE/SZSE，任一交易所缺失即整日 NULL（不输出部分和）。
 """
 from __future__ import annotations
 
@@ -13,6 +20,8 @@ from .db import session
 from .io_utils import atomic_write_json
 from .locking import publish_lock
 
+# 市场分类：优先使用 core_stock_meta.market（权威），缺失时按代码前缀兜底。
+# 689（科创板 CDR）与 302（创业板）是旧前缀规则漏判的板块（W1-03/W2-07）。
 SQL_VIEW = """
 CREATE OR REPLACE VIEW v_stock AS
 SELECT d.ts_code,
@@ -30,8 +39,9 @@ SELECT d.ts_code,
        CASE WHEN d.ts_code LIKE '%.SH' THEN 'SSE'
             WHEN d.ts_code LIKE '%.SZ' THEN 'SZSE'
             ELSE 'BSE' END AS exchange,
-       CASE WHEN d.ts_code LIKE '688%' THEN '科创板'
-            WHEN d.ts_code LIKE '300%' OR d.ts_code LIKE '301%' THEN '创业板'
+       CASE WHEN m.market IN ('主板', '创业板', '科创板', '北交所') THEN m.market
+            WHEN d.ts_code LIKE '688%' OR d.ts_code LIKE '689%' THEN '科创板'
+            WHEN d.ts_code LIKE '300%' OR d.ts_code LIKE '301%' OR d.ts_code LIKE '302%' THEN '创业板'
             WHEN d.ts_code LIKE '8%' OR d.ts_code LIKE '4%' OR d.ts_code LIKE '920%' THEN '北交所'
             ELSE '主板' END AS market,
        m.list_date
@@ -78,8 +88,7 @@ WITH calendar AS (
         ELSE trade_num - listing_num < 5
         END AS is_new_stock
     FROM base
-),
-feat AS (
+), feat AS (
     SELECT *,
            max(adj_close) OVER w252 AS hi252,
            min(adj_close) OVER w252 AS lo252,
@@ -117,10 +126,12 @@ SELECT *,
 FROM flagged
 """
 
+# MA 比较使用相对容差：数学上「价格 == 均线」在浮点求和下可能翻转为「站上」，
+# 契约规定相等视为未站上（W11-04 / W1-09）。
 SQL_MARKET = """
 CREATE OR REPLACE TABLE mart_market_day AS
 WITH f AS (
-    SELECT trade_date, ts_code, ret, circ_mv, prev_circ_mv, amount,
+    SELECT trade_date, ts_code, ret, circ_mv, prev_circ_mv, amount, market_prev_date,
            turnover_rate, adv, dec, flat, is_limit_up, is_limit_down, limit_streak,
            adj_close, ma20, ma60, ma250, hi252, lo252, n_hist252, n_hist_all, pre_close, up_limit
     FROM feat_stock
@@ -139,6 +150,8 @@ w2 AS (
 ret_agg AS (
     SELECT trade_date,
            count(*)                                        AS n_valid,
+           count(prev_circ_mv)                             AS n_wcap,
+           count(market_prev_date)                         AS n_prev_obs,
            count(*) FILTER (WHERE adv)                      AS n_adv,
            count(*) FILTER (WHERE dec)                      AS n_dec,
            count(*) FILTER (WHERE flat)                     AS n_flat,
@@ -158,14 +171,15 @@ ret_agg AS (
            CASE WHEN count(is_limit_up) > 0 THEN coalesce(max(CASE WHEN is_limit_up THEN limit_streak END), 0) END AS max_streak_price,
            CASE WHEN count(is_limit_up) > 0 THEN count(*) FILTER (WHERE limit_streak >= 2) END AS streak_n_price,
            CASE WHEN count(is_limit_up) > 0 THEN count(*) FILTER (WHERE limit_streak = 1) END AS first_board_n_price,
+           count(*) FILTER (WHERE abs(ret) >= 0.5)          AS n_extreme_ret,
            count(*) FILTER (WHERE adj_close >= hi252 AND n_hist252 >= 250) AS new_high_n,
            count(*) FILTER (WHERE adj_close <= lo252 AND n_hist252 >= 250) AS new_low_n,
            count(*) FILTER (WHERE n_hist_all >= 20)          AS n_hist20,
            count(*) FILTER (WHERE n_hist_all >= 60)          AS n_hist60,
            count(*) FILTER (WHERE n_hist252 >= 250)          AS n_hist250,
-           count(*) FILTER (WHERE adj_close > ma20 AND n_hist_all >= 20)   AS above_ma20_n,
-           count(*) FILTER (WHERE adj_close > ma60 AND n_hist_all >= 60)   AS above_ma60_n,
-           count(*) FILTER (WHERE adj_close > ma250 AND n_hist252 >= 250)  AS above_ma250_n
+           count(*) FILTER (WHERE adj_close > ma20 * (1 + 1e-12) AND n_hist_all >= 20)   AS above_ma20_n,
+           count(*) FILTER (WHERE adj_close > ma60 * (1 + 1e-12) AND n_hist_all >= 60)   AS above_ma60_n,
+           count(*) FILTER (WHERE adj_close > ma250 * (1 + 1e-12) AND n_hist252 >= 250)  AS above_ma250_n
     FROM w2
     GROUP BY trade_date
 ),
@@ -179,8 +193,8 @@ cap_agg AS (
            max(weight)                                     AS max_weight
     FROM (
         SELECT *,
-               row_number() OVER (PARTITION BY trade_date ORDER BY wcap DESC) AS rn_w,
-               row_number() OVER (PARTITION BY trade_date ORDER BY ret DESC)  AS rn_r,
+               row_number() OVER (PARTITION BY trade_date ORDER BY wcap DESC, ts_code) AS rn_w,
+               row_number() OVER (PARTITION BY trade_date ORDER BY ret DESC, ts_code)  AS rn_r,
                count(*) OVER (PARTITION BY trade_date)                        AS n_all
         FROM w2
     )
@@ -204,59 +218,112 @@ flow AS (
     GROUP BY trade_date
 ),
 margin AS (
-    SELECT trade_date, sum(rzye) AS rzye, sum(rzmre) AS rzmre
+    -- 两融只汇总 SSE/SZSE（与股票池一致，不含 BSE）；任一交易所缺失即整日 NULL。
+    SELECT trade_date,
+           sum(rzye)  FILTER (WHERE exchange_id IN ('SSE', 'SZSE')) AS rzye,
+           sum(rzmre) FILTER (WHERE exchange_id IN ('SSE', 'SZSE')) AS rzmre,
+           count(DISTINCT exchange_id) FILTER (WHERE exchange_id IN ('SSE', 'SZSE')) AS margin_n_exchanges
     FROM core_margin_day
     GROUP BY trade_date
 ),
+limit_events AS (
+    -- fd_amount 量纲异常：2019-11-28..2020-04-20 上游整体放大 ~1e3（清洗后中位数仍约
+    -- 100x 于正常期），无法可靠换算，整段按 NULL 处理并在契约/gate17 披露。
+    -- 其余时期 fd_amount/float_mv > 2 的单行样本同样视为量纲异常并按 NULL。
+    SELECT trade_date, is_up, is_down, is_broken, limit_times,
+           CASE WHEN trade_date BETWEEN DATE '2019-11-28' AND DATE '2020-04-20' THEN NULL
+                WHEN float_mv > 0 AND isfinite(float_mv) AND fd_amount IS NOT NULL
+                     AND isfinite(fd_amount) AND fd_amount / float_mv > 2
+                THEN NULL ELSE fd_amount END AS fd_amount_clean
+    FROM core_limit_event
+),
 lim AS (
+    -- 官方名单口径：只提供炸板率/封单额等依赖 limit_list_d 的列；
+    -- max_streak/streak_n/first_board_n 采用价格口径（见上面的 *_price 列）。
     SELECT trade_date,
            sum(is_up)                                        AS limit_up_list_n,
            sum(is_down)                                      AS limit_down_list_n,
            sum(is_broken)                                    AS broken_n,
-           max(CASE WHEN is_up THEN limit_times END)          AS max_streak,
-           sum(CASE WHEN is_up AND limit_times >= 2 THEN 1 ELSE 0 END) AS streak_n,
-           sum(CASE WHEN is_up AND limit_times = 1 THEN 1 ELSE 0 END)  AS first_board_n,
-           sum(CASE WHEN is_up THEN fd_amount END)           AS limit_fd_amount
-    FROM core_limit_event
+           sum(CASE WHEN is_up THEN fd_amount_clean END)     AS limit_fd_amount
+    FROM limit_events
     GROUP BY trade_date
+),
+joined AS (
+    SELECT r.*,
+           c.cw_ret, c.hhi, c.max_weight, c.top10_share, c.top10_contrib, c.gain_share_top5pct,
+           i.hs300_ret, i.zz500_ret, i.zz1000_ret, i.sse_ret,
+           f.flow_breadth, f.net_mf_amount, f.main_net_amount,
+           coalesce(m.margin_n_exchanges, 0)                 AS margin_n_exchanges,
+           CASE WHEN m.margin_n_exchanges = 2 THEN m.rzye END AS rzye,
+           CASE WHEN m.margin_n_exchanges = 2 THEN m.rzmre END AS rzmre,
+           l.limit_up_list_n, l.limit_down_list_n, l.broken_n, l.limit_fd_amount
+    FROM ret_agg r
+    LEFT JOIN cap_agg  c USING (trade_date)
+    LEFT JOIN idx      i USING (trade_date)
+    LEFT JOIN flow     f USING (trade_date)
+    LEFT JOIN margin   m USING (trade_date)
+    LEFT JOIN lim      l USING (trade_date)
+),
+ratio AS (
+    SELECT *,
+           CASE WHEN n_prev_obs = 0 THEN NULL
+                ELSE n_wcap::DOUBLE / nullif(n_valid, 0) END AS weight_coverage,
+           median(n_valid) OVER (ORDER BY trade_date
+               ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS n_valid_median20,
+           count(n_valid) OVER (ORDER BY trade_date
+               ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS n_prior_days
+    FROM joined
+),
+classified AS (
+    SELECT *,
+           CASE WHEN n_prior_days >= 5 AND n_valid_median20 > 0
+                THEN n_valid::DOUBLE / n_valid_median20 END AS n_valid_ratio
+    FROM ratio
+),
+final AS (
+    SELECT *,
+           CASE WHEN n_prev_obs = 0 AND n_prior_days = 0 THEN 'ok'
+                WHEN (weight_coverage IS NOT NULL AND weight_coverage < 0.95)
+                  OR (n_valid_ratio IS NOT NULL AND n_valid_ratio < 0.95) THEN 'partial'
+                ELSE 'ok' END AS data_quality
+    FROM classified
 )
-SELECT r.trade_date,
-       r.n_valid, r.n_adv, r.n_dec, r.n_flat,
-       r.n_adv::DOUBLE / nullif(r.n_adv + r.n_dec, 0)        AS breadth,
-       r.ew_ret, r.med_ret, r.q10, r.q25, r.q75, r.q90,
-       (r.q75 - r.q25)                                       AS iqr,
-       r.csd, r.skew, r.amount, r.turnover_rate,
-       c.cw_ret, c.hhi, c.max_weight,
-       c.top10_share,
-       c.top10_contrib * 100                                 AS top10_contrib_pct,
-       c.gain_share_top5pct,
-       (r.ew_ret - c.cw_ret)                                 AS ew_cw_gap,
-       r.limit_up_n, r.limit_down_n,
-       l.limit_up_list_n, l.limit_down_list_n, l.broken_n,
-       r.max_streak_price AS max_streak,
-       r.streak_n_price   AS streak_n,
-       r.first_board_n_price AS first_board_n,
-       l.limit_fd_amount,
+SELECT trade_date,
+       n_valid, n_adv, n_dec, n_flat,
+       n_adv::DOUBLE / nullif(n_adv + n_dec, 0)        AS breadth,
+       ew_ret, med_ret, q10, q25, q75, q90,
+       (q75 - q25)                                     AS iqr,
+       csd, skew, amount, turnover_rate,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE cw_ret END              AS cw_ret,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE hhi END                 AS hhi,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE max_weight END          AS max_weight,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE top10_share END         AS top10_share,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE top10_contrib * 100 END AS top10_contrib_pct,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE gain_share_top5pct END  AS gain_share_top5pct,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE ew_ret - cw_ret END     AS ew_cw_gap,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE limit_up_n END          AS limit_up_n,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE limit_down_n END        AS limit_down_n,
+       limit_up_list_n, limit_down_list_n, broken_n,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE max_streak_price END    AS max_streak,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE streak_n_price END      AS streak_n,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE first_board_n_price END AS first_board_n,
+       limit_fd_amount,
        NULL::BIGINT AS limit_up_ex_st_n,
        NULL::BIGINT AS limit_up_st_n,
-       r.limit_up_ex_st_n AS limit_up_non5pct_n,
-       (r.limit_up_n - r.limit_up_ex_st_n) AS limit_up_5pct_n,
-       CASE WHEN l.broken_n IS NOT NULL AND l.limit_up_list_n IS NOT NULL
-            THEN l.broken_n::DOUBLE / nullif(l.limit_up_list_n + l.broken_n, 0) END AS broken_rate,
-       r.new_high_n, r.new_low_n,
-       r.above_ma20_n::DOUBLE / nullif(r.n_hist20, 0)         AS ma20_breadth,
-       r.above_ma60_n::DOUBLE / nullif(r.n_hist60, 0)         AS ma60_breadth,
-       r.above_ma250_n::DOUBLE / nullif(r.n_hist250, 0)       AS ma250_breadth,
-       i.hs300_ret, i.zz500_ret, i.zz1000_ret, i.sse_ret,
-       f.flow_breadth, f.net_mf_amount, f.main_net_amount,
-       m.rzye, m.rzmre
-FROM ret_agg r
-LEFT JOIN cap_agg c USING (trade_date)
-LEFT JOIN idx i USING (trade_date)
-LEFT JOIN flow f USING (trade_date)
-LEFT JOIN margin m USING (trade_date)
-LEFT JOIN lim l USING (trade_date)
-ORDER BY r.trade_date
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE limit_up_ex_st_n END    AS limit_up_non5pct_n,
+       CASE WHEN data_quality = 'partial' THEN NULL ELSE limit_up_n - limit_up_ex_st_n END AS limit_up_5pct_n,
+       CASE WHEN broken_n IS NOT NULL AND limit_up_list_n IS NOT NULL
+            THEN broken_n::DOUBLE / nullif(limit_up_list_n + broken_n, 0) END    AS broken_rate,
+       new_high_n, new_low_n,
+       above_ma20_n::DOUBLE / nullif(n_hist20, 0)         AS ma20_breadth,
+       above_ma60_n::DOUBLE / nullif(n_hist60, 0)         AS ma60_breadth,
+       above_ma250_n::DOUBLE / nullif(n_hist250, 0)       AS ma250_breadth,
+       hs300_ret, zz500_ret, zz1000_ret, sse_ret,
+       flow_breadth, net_mf_amount, main_net_amount,
+       rzye, rzmre,
+       weight_coverage, n_valid_ratio, data_quality, margin_n_exchanges, n_extreme_ret
+FROM final
+ORDER BY trade_date
 """
 
 SQL_SECTOR_DAY = """
@@ -364,13 +431,25 @@ ORDER BY trade_date
 
 SQL_LIMIT_QUALITY = """
 CREATE OR REPLACE TABLE mart_limit_quality AS
+WITH cleaned AS (
+    -- 与 mart_market_day.limit_fd_amount 相同的量纲防护：2019-11-28..2020-04-20 上游
+    -- 量纲异常期整段按 NULL；其余时期 fd_amount/float_mv > 2 的单行样本按 NULL。
+    SELECT trade_date, is_up, open_times,
+           CASE WHEN trade_date BETWEEN DATE '2019-11-28' AND DATE '2020-04-20' THEN NULL
+                WHEN float_mv > 0 AND isfinite(float_mv) AND fd_amount IS NOT NULL
+                     AND isfinite(fd_amount) AND fd_amount / float_mv > 2
+                THEN NULL ELSE fd_amount END AS fd_amount_clean,
+           float_mv
+    FROM core_limit_event
+)
 SELECT trade_date,
        count(*) FILTER (WHERE is_up)                                   AS n_limit_up,
-       median(CASE WHEN is_up AND float_mv > 0 AND fd_amount > 0 THEN fd_amount / float_mv END) AS fd_ratio,
+       median(CASE WHEN is_up AND float_mv > 0 AND fd_amount_clean > 0
+                   THEN fd_amount_clean / float_mv END)                AS fd_ratio,
        avg(CASE WHEN is_up THEN open_times END)                        AS avg_open_times,
        count(*) FILTER (WHERE is_up AND open_times > 0)::DOUBLE /
            nullif(count(*) FILTER (WHERE is_up), 0)                    AS open_share
-FROM core_limit_event
+FROM cleaned
 GROUP BY trade_date
 ORDER BY trade_date
 """
@@ -388,7 +467,8 @@ SELECT date_trunc('month', trade_date)::DATE AS month,
        sum(amount)                 AS amount,
        avg(hhi)                    AS hhi,
        avg(top10_share)            AS top10_share,
-       exp(sum(ln(1 + ew_ret))) - 1 AS ew_ret_cum,
+       -- 任一日 ew_ret 缺失则整月累计为 NULL（与 hs300_ret_cum 的缺失语义一致）
+       CASE WHEN count(ew_ret) = count(*) THEN exp(sum(ln(1 + ew_ret))) - 1 END AS ew_ret_cum,
        CASE WHEN count(hs300_ret) = count(*) THEN exp(sum(ln(1 + hs300_ret))) - 1 END AS hs300_ret_cum,
        count(hs300_ret) AS hs300_n_days
 FROM mart_market_day
@@ -404,7 +484,7 @@ SELECT date_trunc('month', trade_date)::DATE AS month, sw_l1,
        avg(cw_ret)       AS cw_ret,
        avg(iqr)          AS iqr,
        sum(amount)       AS amount,
-       exp(sum(ln(1 + ew_ret))) - 1 AS ew_ret_cum
+       CASE WHEN count(ew_ret) = count(*) THEN exp(sum(ln(1 + ew_ret))) - 1 END AS ew_ret_cum
 FROM mart_sector_day
 GROUP BY 1, 2 ORDER BY 1, 2
 """
@@ -419,8 +499,9 @@ SELECT f.ts_code, f.name, f.sw_l1, f.market, last_day.d AS trade_date,
        CASE WHEN f.trade_date = last_day.d THEN f.ret ELSE 0 END AS ret,
        f.circ_mv, f.total_mv, f.turnover_rate, f.pe_ttm, f.pb,
        CASE WHEN f.trade_date = last_day.d THEN f.amount * 1000 ELSE 0 END AS amount,
-       CASE WHEN f.trade_date = last_day.d THEN f.is_limit_up ELSE false END AS is_limit_up,
-       CASE WHEN f.trade_date = last_day.d THEN f.is_limit_down ELSE false END AS is_limit_down
+       -- 新股在 latest 日没有价格口径涨跌停判定（NULL），对外统一 false，避免前端把未知当缺失。
+       CASE WHEN f.trade_date = last_day.d THEN coalesce(f.is_limit_up, false) ELSE false END AS is_limit_up,
+       CASE WHEN f.trade_date = last_day.d THEN coalesce(f.is_limit_down, false) ELSE false END AS is_limit_down
 FROM feat_stock f, last_day
 QUALIFY row_number() OVER (PARTITION BY f.ts_code ORDER BY f.trade_date DESC) = 1
 """
@@ -439,13 +520,23 @@ STEPS = [
     ("mart_stock_latest", SQL_LATEST),
 ]
 
+# `--only sector_day` 必须连带重建所有下游行业表，否则单步刷新会留下跨版本陈旧表（W2-08）。
+SECTOR_DAY_DEPENDENTS = ("mart_sector_roll", "mart_sector_rank",
+                         "mart_rotation_day", "mart_sector_month")
 
-def run(only: list[str] | None = None) -> dict:
+INDEXES = [
+    ("feat_stock_trade_date", "CREATE INDEX IF NOT EXISTS idx_feat_stock_trade_date ON feat_stock(trade_date)"),
+    ("feat_stock_code_date", "CREATE INDEX IF NOT EXISTS idx_feat_stock_code_date ON feat_stock(ts_code, trade_date)"),
+    ("core_stock_day_trade_date", "CREATE INDEX IF NOT EXISTS idx_core_stock_day_trade_date ON core_stock_day(trade_date)"),
+]
+
+
+def run(only: list[str] | None = None, *, with_indexes: bool = True) -> dict:
     bridge = (settings.ROOT / "config" / "industry_bridge.csv").as_posix().replace("'", "''")
     report = {}
     selected = {name for name, _ in STEPS if not only or any(part in name for part in only)}
     if "mart_sector_day" in selected:
-        selected.add("mart_sector_roll")
+        selected.update(SECTOR_DAY_DEPENDENTS)
     with publish_lock(), session(wait=True, timeout_sec=600) as con:
         con.execute("BEGIN TRANSACTION")
         try:
@@ -459,6 +550,11 @@ def run(only: list[str] | None = None) -> dict:
                 sec = round(time.time() - t0, 1)
                 report[name] = {"rows": int(rows), "sec": sec}
                 print(f"[marts] {name}: {rows:,} rows in {sec}s", flush=True)
+            if with_indexes:
+                for label, sql in INDEXES:
+                    t0 = time.time()
+                    con.execute(sql)
+                    print(f"[marts] index {label}: {round(time.time() - t0, 1)}s", flush=True)
             con.execute("COMMIT")
         except BaseException:
             con.execute("ROLLBACK")
@@ -472,5 +568,6 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", action="append")
+    ap.add_argument("--no-indexes", action="store_true")
     args = ap.parse_args()
-    print(json.dumps(run(args.only), ensure_ascii=False, indent=2))
+    print(json.dumps(run(args.only, with_indexes=not args.no_indexes), ensure_ascii=False, indent=2))

@@ -2,6 +2,13 @@
 
 运行：python -m backend.main  （默认 127.0.0.1:8000）
 设计：口径在 mart 层算好，接口只做筛选与序列化；DuckDB 单连接 + 锁。
+
+安全约定（见 docs/technical.md「API 安全」）：
+- 所有 /api/* 请求（含 GET）校验 Host ∈ TRUSTED_HOSTS（默认 127.0.0.1/localhost/[::1]，
+  可用 ASHARE_RADAR_TRUSTED_HOSTS 覆盖，逗号分隔）；非法 Host 返回 403 JSON。
+- 写接口额外校验 Origin / 客户端地址；GET /api/watchlist 额外要求
+  `X-Requested-With: ashare-radar` 且所有 /api/* 响应 Cache-Control: no-store。
+- 未匹配的 /api/* 返回 404 JSON，不再落入 SPA 兜底。
 """
 from __future__ import annotations
 
@@ -13,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tomllib
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -34,6 +42,28 @@ META = settings.META
 DB = settings.DATA / "app.sqlite"
 DIST = Path(os.getenv("ASHARE_RADAR_DIST_DIR", str(ROOT / "frontend" / "dist"))).resolve()
 
+# ---------------------------------------------------------------- 安全常量
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+TRUSTED_HOSTS_ENV = "ASHARE_RADAR_TRUSTED_HOSTS"
+WATCHLIST_HEADER = "X-Requested-With"
+WATCHLIST_HEADER_VALUE = "ashare-radar"
+API_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()"),
+    ("Cache-Control", "no-store"),
+)
+
+# ---------------------------------------------------------------- 契约常量
+STOCKS_DEFAULT_LIMIT = 6000  # 与前端 api.ts 默认值一致（静态包为全量后由前端 slice）
+STOCKS_MAX_LIMIT = 10000
+SECTOR_SERIES_DEFAULT_LIMIT = 750  # 无区间时 /api/sectors/series 最多返回的行数
+MAX_WATCH_SHARES = 1e12
+MAX_WATCH_COST = 1e9
+DEFAULT_UPDATE_TIMEOUT = 2700  # 秒；ASHARE_RADAR_UPDATE_TIMEOUT 可覆盖
+DISTRIBUTION_BOUND = 0.11
+
 
 class ISOJSONProvider(DefaultJSONProvider):
     """DuckDB DATE/DATETIME 默认会被 Flask 序列化成 RFC 822，前端和图表要 ISO。"""
@@ -50,10 +80,45 @@ app.json.ensure_ascii = False
 app.json.sort_keys = False
 
 
+def _parse_host(value: str | None) -> str | None:
+    """把 Host/Origin 值归一为小写主机名（容忍端口与 IPv6 方括号）。"""
+    if not value:
+        return None
+    raw = value.strip().lower()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit("//" + raw)
+    except ValueError:
+        return None
+    return parsed.hostname
+
+
+def trusted_hosts() -> frozenset[str]:
+    """信任的 Host 集合；ASHARE_RADAR_TRUSTED_HOSTS 非空时整体覆盖默认值。"""
+    raw = (os.getenv(TRUSTED_HOSTS_ENV) or "").strip()
+    if raw:
+        hosts = {host for host in (_parse_host(item) for item in raw.split(",")) if host}
+        if hosts:
+            return frozenset(hosts)
+    return LOCAL_HOSTS
+
+
+def _is_api_path(path: str) -> bool:
+    return path == "/api" or path.startswith("/api/")
+
+
 @app.before_request
 def validate_api_request():
-    if not request.path.startswith("/api/"):
+    """统一入口校验：/api/* 全部方法（含 GET）先过 Host，再做参数与写接口鉴权。"""
+    if not _is_api_path(request.path):
         return None
+    if _parse_host(request.host) not in trusted_hosts():
+        abort(403, "untrusted host")
+    rule = request.url_rule
+    if rule is None or rule.endpoint == "static_files":
+        # 未匹配的 /api/* 不要回落到 SPA index，也不要先做参数校验。
+        abort(404, "unknown API endpoint")
     for key in ("date", "start", "end"):
         raw = request.args.get(key)
         if raw is not None:
@@ -62,15 +127,23 @@ def validate_api_request():
     if start and end and start > end:
         abort(400, "start must not be after end")
     if request.method in ("POST", "PATCH", "DELETE"):
-        local = {"localhost", "127.0.0.1", "::1"}
-        if urlsplit(request.host_url).hostname not in local:
-            abort(403, "local host required")
-        if request.remote_addr and request.remote_addr not in local:
+        if request.remote_addr and request.remote_addr not in LOCAL_HOSTS:
             abort(403, "local client required")
         origin = request.headers.get("Origin")
-        if origin and (urlsplit(origin).scheme not in {"http", "https"} or urlsplit(origin).hostname not in local):
-            abort(403, "local origin required")
+        if origin:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or parsed.hostname not in trusted_hosts():
+                abort(403, "local origin required")
     return None
+
+
+@app.after_request
+def add_api_security_headers(response):
+    """所有 /api/* 响应补安全头；UI/静态资源不加 CSP（避免破坏 SPA）。"""
+    if _is_api_path(request.path):
+        for key, value in API_SECURITY_HEADERS:
+            response.headers.setdefault(key, value)
+    return response
 
 
 def _date_arg(raw: str) -> str:
@@ -89,12 +162,14 @@ def _code_arg(code: str) -> str:
     return code
 
 
-def _quantity(value: Any, field: str) -> float:
+def _quantity(value: Any, field: str, maximum: float | None = None) -> float:
     try:
         if isinstance(value, bool):
             raise ValueError
         number = float(value)
         if not math.isfinite(number) or number < 0:
+            raise ValueError
+        if maximum is not None and number > maximum:
             raise ValueError
     except (TypeError, ValueError, OverflowError):
         abort(400, f"{field} must be a finite non-negative number")
@@ -108,15 +183,49 @@ def _payload() -> dict:
     return value
 
 
+def _strict_payload(allowed: set[str]) -> dict:
+    """写接口 JSON body 白名单：未知键 400，避免静默忽略客户端拼写错误。"""
+    payload = _payload()
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        abort(400, f"unknown fields: {', '.join(unknown)}")
+    return payload
+
+
 @app.errorhandler(HTTPException)
 def http_error(error):
     return jsonify({"error": error.name, "detail": error.description}), error.code
+
+
+@app.errorhandler(duckdb.CatalogException)
+def _db_schema_missing(error):
+    """旧库/半建库缺 mart 表时返回 409 + 重建提示，而不是笼统 500。"""
+    message = str(error).lower()
+    if any(hint in message for hint in ("does not exist", "not found", "no such")):
+        return (
+            jsonify({"error": "mart missing", "detail": "数据表未完整构建，请运行 python -m pipeline.build_marts 重建"}),
+            409,
+        )
+    return internal_error(error)
+
+
+@app.errorhandler(sqlite3.OperationalError)
+def _watch_db_busy(error):
+    message = str(error).lower()
+    if "locked" in message or "busy" in message:
+        return (
+            jsonify({"error": "watchlist busy", "detail": "本地自选库繁忙，请稍后重试"}),
+            503,
+            {"Retry-After": "5"},
+        )
+    return internal_error(error)
 
 
 @app.errorhandler(Exception)
 def internal_error(error):
     app.logger.error("request failed: %s", type(error).__name__)
     return jsonify({"error": "internal server error"}), 500
+
 
 _lock = threading.Lock()
 _update_lock = threading.Lock()
@@ -130,7 +239,6 @@ _update_job: dict[str, Any] = {
     "finished_at": None,
     "trade_date": None,
 }
-
 
 
 def con() -> duckdb.DuckDBPyConnection:
@@ -167,9 +275,6 @@ def _release_con(exc: BaseException | None) -> None:
     c = g.pop("_con", None)
     if c is not None:
         c.close()
-    watch = g.pop("_wdb", None)
-    if watch is not None:
-        watch.close()
 
 
 def _clean(v: Any) -> Any:
@@ -188,6 +293,69 @@ def rows(sql: str, params: list[Any] | None = None) -> list[dict]:
 def one(sql: str, params: list[Any] | None = None) -> dict:
     r = rows(sql, params)
     return r[0] if r else {}
+
+
+def _trade_date_exists(d: str) -> bool:
+    return bool(one("SELECT 1 AS ok FROM mart_market_day WHERE trade_date = ?::DATE", [d]).get("ok"))
+
+
+def _table_columns(table: str) -> set[str]:
+    """information_schema 列名（旧库缺列时用于可选的兼容输出）。"""
+    try:
+        return {
+            str(row["column_name"])
+            for row in rows(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]
+            )
+        }
+    except duckdb.Error:
+        return set()
+
+
+def _read_meta_json(name: str) -> dict:
+    try:
+        value = json.loads((META / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _data_quality_meta(n_days: int) -> dict:
+    """meta.data_quality：与 export_static.py 同结构（partial 日清单 + 修复报告摘要）。"""
+    partial_days: list[str] = []
+    if "data_quality" in _table_columns("mart_market_day"):
+        partial_days = [
+            str(row["d"])
+            for row in rows(
+                "SELECT trade_date::VARCHAR AS d FROM mart_market_day "
+                "WHERE data_quality <> 'ok' ORDER BY trade_date"
+            )
+        ]
+    repair = _read_meta_json("history_repair.json")
+    return {
+        "partial_days": partial_days,
+        "n_partial_days": len(partial_days),
+        "repaired_at": repair.get("finished_at") or repair.get("generated_at"),
+        "repaired_days": len(repair.get("repaired") or []),
+        "history_gate": {
+            "pass": not partial_days,
+            "n_partial_days": len(partial_days),
+            "n_days": n_days,
+            "source": "mart_market_day.data_quality",
+        },
+    }
+
+
+def _app_version() -> str:
+    """pyproject.toml 的版本号（静态 payload meta.version 同源，供 Briefing 页脚）。"""
+    try:
+        with (ROOT / "pyproject.toml").open("rb") as stream:
+            return str(tomllib.load(stream).get("project", {}).get("version") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+APP_VERSION = _app_version()
 
 
 # ------------------------------------------------------------------ update job
@@ -214,6 +382,20 @@ def _job_progress(value: int, stage: str | None = None, message: str | None = No
             _update_job["stage"] = stage
         if message:
             _update_job["message"] = message
+
+
+def _update_timeout() -> int:
+    """子进程超时（秒），默认 2700；ASHARE_RADAR_UPDATE_TIMEOUT 可覆盖。"""
+    raw = os.getenv("ASHARE_RADAR_UPDATE_TIMEOUT")
+    if raw is None:
+        return DEFAULT_UPDATE_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_UPDATE_TIMEOUT
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_UPDATE_TIMEOUT
+    return max(1, int(value))
 
 
 def _friendly_update_error(text: str) -> str:
@@ -255,7 +437,7 @@ def _run_step(args: list[str], stage: str, start: int, end: int) -> tuple[int, s
         timed_out.set()
         proc.kill()
 
-    timer = threading.Timer(2700, stop)
+    timer = threading.Timer(_update_timeout(), stop)
     timer.daemon = True
     timer.start()
     lines: list[str] = []
@@ -334,7 +516,15 @@ def start_update():
         abort(403, "missing X-Ashare-Radar header")
     with _update_lock:
         if _update_job.get("state") == "running":
-            return jsonify(dict(_update_job)), 202
+            # 运行中再次 POST：明确 409，调用方不会把“未入队”误判为“已开始”。
+            return (
+                jsonify({
+                    "error": "update already running",
+                    "detail": "已有更新任务正在运行，请稍后重试",
+                    "job": dict(_update_job),
+                }),
+                409,
+            )
         job_id = uuid.uuid4().hex[:10]
         _update_job.update(
             id=job_id,
@@ -357,8 +547,6 @@ def update_status():
 
 
 @app.get("/api/meta")
-
-
 def meta():
     base = one("SELECT min(trade_date) f, max(trade_date) d, count(*) n FROM mart_market_day")
     n_stocks = one("SELECT n_valid n FROM mart_market_day ORDER BY trade_date DESC LIMIT 1").get("n", 0)
@@ -378,20 +566,35 @@ def meta():
                 alert.pop("log", None)
         except Exception:
             alert = None
-    return jsonify(
-        {
-            "first_trade_date": str(base["f"]) if base.get("f") else None,
-            "last_trade_date": str(base["d"]) if base.get("d") else None,
-            "n_days": base.get("n"),
-            "n_stocks": n_stocks,
-            "source": ", ".join(sorted(set(status.get("sources", {}).values()))) or "unknown",
-            "sources": status.get("sources", {}),
-            "status": status.get("status", "unknown"),
-            "updated_at": status.get("updated_at"),
-            "warnings": status.get("warnings", []),
-            "alert": alert,
-        }
-    )
+    raw_sources = status.get("sources") if isinstance(status.get("sources"), dict) else {}
+    sources: dict[str, Any] = {}
+    unavailable: list[str] = []
+    for name, source in raw_sources.items():
+        label = "" if source is None else str(source).strip()
+        if label in ("unavailable", "incomplete"):
+            if label == "unavailable":
+                unavailable.append(str(name))
+        else:
+            sources[str(name)] = source
+    source_names = sorted({str(value).strip() for value in sources.values() if str(value).strip()})
+    payload = {
+        "first_trade_date": str(base["f"]) if base.get("f") else None,
+        "last_trade_date": str(base["d"]) if base.get("d") else None,
+        "n_days": base.get("n"),
+        "n_stocks": n_stocks,
+        "version": APP_VERSION,
+        "source": ", ".join(source_names) or "unknown",
+        "sources": sources,
+        "unavailable_datasets": sorted(unavailable),
+        "status": status.get("status", "unknown"),
+        "updated_at": status.get("updated_at"),
+        "warnings": status.get("warnings", []),
+        "alert": alert,
+        "data_quality": _data_quality_meta(int(base.get("n") or 0)),
+    }
+    if status.get("adj_degraded_days"):
+        payload["adj_degraded_days"] = status["adj_degraded_days"]
+    return jsonify(payload)
 
 
 @app.get("/api/market/series")
@@ -405,8 +608,8 @@ def market_series():
         return jsonify(
             rows(
                 """
-                SELECT month::VARCHAR AS trade_date, n_days, breadth, ew_ret, cw_ret, med_ret,
-                       csd, amount, hhi, top10_share, ew_ret_cum, hs300_ret_cum
+                SELECT month::VARCHAR AS trade_date, n_days, n_valid, breadth, ew_ret, cw_ret, med_ret,
+                       csd, amount, hhi, top10_share, ew_ret_cum, hs300_ret_cum, hs300_n_days
                 FROM mart_market_month
                 WHERE (?::DATE IS NULL OR month >= ?::DATE) AND (?::DATE IS NULL OR month <= ?::DATE)
                 ORDER BY month
@@ -414,6 +617,8 @@ def market_series():
                 [start, start, end, end],
             )
         )
+    # SELECT *：mart_market_day 追加新列（weight_coverage/n_valid_ratio/data_quality/
+    # margin_n_exchanges/n_extreme_ret）后 API 自动透出，旧库未重建时也不会报错。
     return jsonify(
         rows(
             """
@@ -441,11 +646,15 @@ def market_day(d: str):
         ),
         w AS (SELECT *, prev_circ_mv / sum(prev_circ_mv) OVER () AS weight FROM f)
         SELECT ts_code, name, sw_l1, ret, weight, weight * ret AS contrib
-        FROM w ORDER BY abs(weight * ret) DESC LIMIT 24
+        FROM w ORDER BY abs(weight * ret) DESC, ts_code LIMIT 24
         """,
         [d],
     )
-    sectors = rows("SELECT * FROM mart_sector_day WHERE trade_date = ?::DATE ORDER BY ew_ret DESC", [d])
+    sectors = rows(
+        "SELECT * FROM mart_sector_day WHERE trade_date = ?::DATE "
+        "ORDER BY ew_ret DESC NULLS LAST, sw_l1",
+        [d],
+    )
     m["contributors"] = contrib
     m["sectors"] = sectors
     return jsonify(m)
@@ -454,13 +663,26 @@ def market_day(d: str):
 @app.get("/api/distribution/<d>")
 def distribution(d: str):
     _date_arg(d)
+    counts = one(
+        f"""
+        SELECT count(*) AS n_total,
+               count(*) FILTER (WHERE ret BETWEEN -{DISTRIBUTION_BOUND} AND {DISTRIBUTION_BOUND}) AS n_binned,
+               count(*) FILTER (WHERE ret < -{DISTRIBUTION_BOUND}) AS n_excluded_lt,
+               count(*) FILTER (WHERE ret > {DISTRIBUTION_BOUND}) AS n_excluded_gt
+        FROM feat_stock WHERE trade_date = ?::DATE AND NOT is_new_stock
+        """,
+        [d],
+    )
+    if not counts.get("n_total"):
+        abort(404, "no data for this date")
     bins = rows(
-        """
+        f"""
         WITH f AS (
             SELECT ret FROM feat_stock
-            WHERE trade_date = ?::DATE AND NOT is_new_stock AND ret BETWEEN -0.11 AND 0.11
+            WHERE trade_date = ?::DATE AND NOT is_new_stock AND ret BETWEEN -{DISTRIBUTION_BOUND} AND {DISTRIBUTION_BOUND}
         )
-        SELECT least(43, greatest(0, cast(floor((ret + 0.11) / 0.22 * 44) AS INTEGER))) AS b, count(*) AS n, min(ret) AS lo, max(ret) AS hi
+        SELECT least(43, greatest(0, cast(floor((ret + {DISTRIBUTION_BOUND}) / {2 * DISTRIBUTION_BOUND} * 44) AS INTEGER))) AS b,
+               count(*) AS n, min(ret) AS lo, max(ret) AS hi
         FROM f GROUP BY b ORDER BY b
         """,
         [d],
@@ -474,28 +696,62 @@ def distribution(d: str):
         """,
         [d],
     )
-    return jsonify({"bins": bins, "stats": stats})
+    return jsonify({"bins": bins, "stats": stats, **{
+        key: counts.get(key) for key in ("n_total", "n_binned", "n_excluded_lt", "n_excluded_gt")
+    }})
 
 
 @app.get("/api/sectors")
 def sectors():
     d = request.args.get("date")
-    return jsonify(rows("SELECT * FROM mart_sector_day WHERE trade_date = ?::DATE ORDER BY ew_ret DESC", [d]))
+    if not d:
+        abort(400, "date required")
+    data = rows(
+        "SELECT * FROM mart_sector_day WHERE trade_date = ?::DATE "
+        "ORDER BY ew_ret DESC NULLS LAST, sw_l1",
+        [d],
+    )
+    if not data and not _trade_date_exists(d):
+        abort(404, "no data for this date")
+    return jsonify(data)
 
 
 @app.get("/api/sectors/series")
 def sector_series():
+    """行业日序列表。
+
+    契约：必须同时提供 start/end，或都不提供。都不提供时最多返回最近
+    SECTOR_SERIES_DEFAULT_LIMIT（750）行，并附全量 total；区间查询返回区间内全部行。
+    """
     start, end = request.args.get("start"), request.args.get("end")
-    return jsonify(
-        rows(
+    if bool(start) != bool(end):
+        abort(400, "start and end must be provided together")
+    if not start:
+        rows_ = rows(
             """
-            SELECT * FROM mart_sector_day
-            WHERE (?::DATE IS NULL OR trade_date >= ?::DATE) AND (?::DATE IS NULL OR trade_date <= ?::DATE)
-            ORDER BY trade_date, sw_l1
+            SELECT * FROM (
+                SELECT * FROM mart_sector_day
+                ORDER BY trade_date DESC, ew_ret DESC NULLS LAST, sw_l1 DESC LIMIT ?
+            ) ORDER BY trade_date, ew_ret DESC NULLS LAST, sw_l1
             """,
-            [start, start, end, end],
+            [SECTOR_SERIES_DEFAULT_LIMIT],
         )
+        total = one("SELECT count(*) AS n FROM mart_sector_day").get("n", 0)
+        return jsonify({
+            "rows": rows_,
+            "total": total,
+            "limited": True,
+            "limit": SECTOR_SERIES_DEFAULT_LIMIT,
+        })
+    data = rows(
+        """
+        SELECT * FROM mart_sector_day
+        WHERE trade_date >= ?::DATE AND trade_date <= ?::DATE
+        ORDER BY trade_date, ew_ret DESC NULLS LAST, sw_l1
+        """,
+        [start, end],
     )
+    return jsonify({"rows": data, "total": len(data), "limited": False, "limit": None})
 
 
 @app.get("/api/sectors/roll")
@@ -528,76 +784,143 @@ def sector_monthly():
 
 @app.get("/api/stocks")
 def stocks():
+    """单日个股列表（默认 Top 6000，与前端一致）。
+
+    返回 `{"date", "limit", "total", "rows"}`；total 为过滤条件（date/sector）下的
+    总行数，rows 按 `ret DESC, ts_code` 确定排序。
+    """
     d = request.args.get("date")
+    if not d:
+        abort(400, "date required")
     sector = request.args.get("sector")
     try:
-        limit = int(request.args.get("limit", 400))
-        if not 1 <= limit <= 10000:
+        limit = int(request.args.get("limit", STOCKS_DEFAULT_LIMIT))
+        if not 1 <= limit <= STOCKS_MAX_LIMIT:
             raise ValueError
     except ValueError:
-        abort(400, "limit must be an integer between 1 and 10000")
-    return jsonify(
-        rows(
-            """
-            SELECT ts_code, name, sw_l1, market, trade_date, close, ret, circ_mv, total_mv,
-                   turnover_rate, pe_ttm, pb, amount * 1000 AS amount, is_limit_up, is_limit_down
-            FROM feat_stock
-            WHERE trade_date = ?::DATE AND NOT is_new_stock
-              AND (? IS NULL OR sw_l1 = ?)
-            ORDER BY ret DESC LIMIT ?
-            """,
-            [d, sector, sector, limit],
-        )
+        abort(400, f"limit must be an integer between 1 and {STOCKS_MAX_LIMIT}")
+    data = rows(
+        """
+        SELECT ts_code, name, sw_l1, market, trade_date, close, ret, circ_mv, total_mv,
+               turnover_rate, pe_ttm, pb, amount * 1000 AS amount, is_limit_up, is_limit_down,
+               count(*) OVER () AS total
+        FROM feat_stock
+        WHERE trade_date = ?::DATE AND NOT is_new_stock
+          AND (? IS NULL OR sw_l1 = ?)
+        ORDER BY ret DESC, ts_code
+        LIMIT ?
+        """,
+        [d, sector, sector, limit],
     )
+    if data:
+        total = int(data[0].pop("total"))
+    else:
+        if not _trade_date_exists(d):
+            abort(404, "no data for this date")
+        total = 0
+    return jsonify({"date": d, "limit": limit, "sector": sector, "total": total, "rows": data})
+
+
+STOCK_SERIES_FIELDS = (
+    "trade_date::VARCHAR AS trade_date, open, high, low, close, vol, adj_factor, adj_close, ret,"
+    " circ_mv, turnover_rate, amount * 1000 AS amount, sw_l1, name"
+)
 
 
 @app.get("/api/stock/<code>")
 def stock_series(code: str):
+    """个股 K 线：前复权 OHLC（按返回窗口最后一个非空 adj_factor 归一）。
+
+    返回 `{code, adjust: "qfq", series: [{trade_date, open, high, low, close, vol,
+    adj_factor, close_raw, adj_close, ret, circ_mv, turnover_rate, amount, sw_l1, name}]}`；
+    open/high/low/close 为前复权价，close_raw 为原始收盘价（与静态 payload
+    stock_series 的 qfq 口径一致，便于前端 K 线跨除权日连续）。
+    """
     _code_arg(code)
     start, end = request.args.get("start"), request.args.get("end")
-    return jsonify(
-        rows(
-            """
-            SELECT trade_date::VARCHAR AS trade_date, open, high, low, close, vol,
-                   adj_close, ret, circ_mv, turnover_rate,
-                   amount * 1000 AS amount, sw_l1, name
-            FROM feat_stock
-            WHERE ts_code = ?
-              AND (?::DATE IS NULL OR trade_date >= ?::DATE)
-              AND (?::DATE IS NULL OR trade_date <= ?::DATE)
-            ORDER BY trade_date
-            """,
-            [code, start, start, end, end],
-        )
+    if not one("SELECT 1 AS ok FROM feat_stock WHERE ts_code = ? LIMIT 1", [code]).get("ok"):
+        abort(404, "no data for this code")
+    data = rows(
+        f"""
+        SELECT {STOCK_SERIES_FIELDS}
+        FROM feat_stock
+        WHERE ts_code = ?
+          AND (?::DATE IS NULL OR trade_date >= ?::DATE)
+          AND (?::DATE IS NULL OR trade_date <= ?::DATE)
+        ORDER BY trade_date
+        """,
+        [code, start, start, end, end],
     )
+    norm: float | None = None
+    for row in data:
+        factor = row.get("adj_factor")
+        if factor is not None:
+            norm = factor
+    for row in data:
+        factor = row.get("adj_factor")
+        scale = (factor / norm) if factor is not None and norm else 1.0
+        row["close_raw"] = row.get("close")
+        for field in ("open", "high", "low", "close"):
+            value = row.get(field)
+            row[field] = value * scale if value is not None else None
+    return jsonify({"code": code, "adjust": "qfq", "series": data})
 
 
-def wdb() -> sqlite3.Connection:
-    existing = getattr(g, "_wdb", None)
-    if existing is not None:
-        return existing
-    c = sqlite3.connect(DB)
-    g._wdb = c
-    c.execute(
-        "CREATE TABLE IF NOT EXISTS watchlist (ts_code TEXT PRIMARY KEY, shares REAL DEFAULT 0, cost REAL DEFAULT 0, added_at TEXT)"
-    )
-    cols = [r[1] for r in c.execute("PRAGMA table_info(watchlist)").fetchall()]
-    if "shares" not in cols:
-        c.execute("ALTER TABLE watchlist ADD COLUMN shares REAL DEFAULT 0")
-    if "cost" not in cols:
-        c.execute("ALTER TABLE watchlist ADD COLUMN cost REAL DEFAULT 0")
+def _watch_connect(read_only: bool) -> sqlite3.Connection:
+    """本地自选 SQLite 连接。
+
+    读路径绝不创建文件/表（GET /api/watchlist 无库时返回 []）；写路径才建表并迁移。
+    """
+    if read_only and not DB.exists():
+        raise FileNotFoundError(DB)
+    c = sqlite3.connect(str(DB), timeout=5)
+    try:
+        if read_only:
+            c.execute("PRAGMA query_only = ON")
+        else:
+            _ensure_watch_schema(c)
+    except BaseException:
+        c.close()
+        raise
     return c
+
+
+def _ensure_watch_schema(c: sqlite3.Connection) -> None:
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS watchlist "
+        "(ts_code TEXT PRIMARY KEY, shares REAL DEFAULT 0, cost REAL DEFAULT 0, added_at TEXT)"
+    )
+    columns = {row[1] for row in c.execute("PRAGMA table_info(watchlist)").fetchall()}
+    if "shares" not in columns:
+        c.execute("ALTER TABLE watchlist ADD COLUMN shares REAL DEFAULT 0")
+    if "cost" not in columns:
+        c.execute("ALTER TABLE watchlist ADD COLUMN cost REAL DEFAULT 0")
+
+
+def _watch_positions() -> dict[str, dict[str, float]]:
+    """读取持仓；库/表不存在时返回空 dict（不产生任何写副作用）。"""
+    if not DB.exists():
+        return {}
+    conn = _watch_connect(read_only=True)
+    try:
+        try:
+            raws = conn.execute(
+                "SELECT ts_code, shares, cost FROM watchlist ORDER BY added_at, ts_code"
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error).lower():
+                return {}
+            raise
+    finally:
+        conn.close()
+    return {row[0]: {"shares": row[1] or 0.0, "cost": row[2] or 0.0} for row in raws}
 
 
 @app.get("/api/watchlist")
 def watchlist():
-    c = wdb()
-    pos = {
-        r[0]: {"shares": r[1] or 0.0, "cost": r[2] or 0.0}
-        for r in c.execute("SELECT ts_code, shares, cost FROM watchlist ORDER BY added_at").fetchall()
-    }
-    c.close()
-    g.pop("_wdb", None)
+    if request.headers.get(WATCHLIST_HEADER) != WATCHLIST_HEADER_VALUE:
+        abort(403, f"missing {WATCHLIST_HEADER} header")
+    pos = _watch_positions()
     if not pos:
         return jsonify([])
     codes = list(pos.keys())
@@ -611,10 +934,13 @@ def watchlist():
     )
     present = {r["ts_code"] for r in data}
     data.extend(
-        {"ts_code": code, "name": code, "close": None, "ret": None,
+        {"ts_code": code, "name": code, "market": None, "sw_l1": None, "close": None, "ret": None,
          "trade_date": None, "quote_date": None, "quote_missing": True}
         for code in codes if code not in present
     )
+    # 按持仓顺序（added_at, ts_code）输出，避免 IN 查询结果顺序不确定。
+    position = {code: index for index, code in enumerate(codes)}
+    data.sort(key=lambda row: position.get(row["ts_code"], len(position)))
     for r in data:
         p = pos.get(r["ts_code"], {})
         r["shares"] = p.get("shares", 0.0)
@@ -624,50 +950,63 @@ def watchlist():
 
 @app.post("/api/watchlist")
 def add_watch():
-    payload = _payload()
+    payload = _strict_payload({"ts_code", "shares", "cost"})
     code = _code_arg(str(payload.get("ts_code", "")).strip())
-    shares = _quantity(payload.get("shares", 0), "shares")
-    cost = _quantity(payload.get("cost", 0), "cost")
-    c = wdb()
-    c.execute(
-        """INSERT INTO watchlist (ts_code, shares, cost, added_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(ts_code) DO UPDATE SET shares=excluded.shares, cost=excluded.cost""",
-        (code, shares, cost, datetime.now().isoformat()),
-    )
-    c.commit()
-    c.close()
-    g.pop("_wdb", None)
+    shares = _quantity(payload.get("shares", 0), "shares", maximum=MAX_WATCH_SHARES)
+    cost = _quantity(payload.get("cost", 0), "cost", maximum=MAX_WATCH_COST)
+    conn = _watch_connect(read_only=False)
+    try:
+        conn.execute(
+            """INSERT INTO watchlist (ts_code, shares, cost, added_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(ts_code) DO UPDATE SET shares=excluded.shares, cost=excluded.cost""",
+            (code, shares, cost, datetime.now().isoformat()),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return jsonify({"ok": True})
 
 
 @app.patch("/api/watchlist/<code>")
 def patch_watch(code: str):
     _code_arg(code)
-    payload = _payload()
-    patch = {key: _quantity(payload[key], key) for key in ("shares", "cost") if key in payload}
+    payload = _strict_payload({"shares", "cost"})
+    patch = {key: _quantity(payload[key], key, maximum=MAX_WATCH_SHARES if key == "shares" else MAX_WATCH_COST)
+             for key in ("shares", "cost") if key in payload}
     if not patch:
         abort(400, "shares or cost required")
-    c = wdb()
-    if not c.execute("SELECT 1 FROM watchlist WHERE ts_code=?", (code,)).fetchone():
-        abort(404, "watch item not found")
-    if "shares" in patch:
-        c.execute("UPDATE watchlist SET shares = ? WHERE ts_code = ?", (patch["shares"], code))
-    if "cost" in patch:
-        c.execute("UPDATE watchlist SET cost = ? WHERE ts_code = ?", (patch["cost"], code))
-    c.commit()
-    c.close()
-    g.pop("_wdb", None)
+    conn = _watch_connect(read_only=False)
+    try:
+        if not conn.execute("SELECT 1 FROM watchlist WHERE ts_code=?", (code,)).fetchone():
+            abort(404, "watch item not found")
+        if "shares" in patch:
+            conn.execute("UPDATE watchlist SET shares = ? WHERE ts_code = ?", (patch["shares"], code))
+        if "cost" in patch:
+            conn.execute("UPDATE watchlist SET cost = ? WHERE ts_code = ?", (patch["cost"], code))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return jsonify({"ok": True})
 
 
 @app.delete("/api/watchlist/<code>")
 def del_watch(code: str):
     _code_arg(code)
-    c = wdb()
-    c.execute("DELETE FROM watchlist WHERE ts_code = ?", (code,))
-    c.commit()
-    c.close()
-    g.pop("_wdb", None)
+    conn = _watch_connect(read_only=False)
+    try:
+        conn.execute("DELETE FROM watchlist WHERE ts_code = ?", (code,))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return jsonify({"ok": True})
 
 
@@ -742,7 +1081,8 @@ def reconcile():
         return jsonify({})
     d = json.loads(p.read_text(encoding="utf-8"))
     return jsonify(
-        {k: d.get(k) for k in ("generated_at", "stocks", "pairs", "mae_pp", "p95_pp", "max_pp", "share_gt_0_1pp")}
+        {k: d.get(k) for k in ("generated_at", "days", "stocks", "pairs",
+                               "mae_pp", "p95_pp", "max_pp", "share_gt_0_1pp")}
     )
 
 
@@ -760,7 +1100,9 @@ def valuation(code: str):
         [code],
     )
     if not data:
-        return jsonify({})
+        # 未知代码统一 null（与静态 payload `pe_percentile[code]` 的 undefined→null 对齐，
+        # 避免前端把 {} 读成“有数据但字段缺失”）。
+        return jsonify(None)
     latest = data[-1]
     last = latest["pe_ttm"]
     if last is None or not math.isfinite(last) or last <= 0:
@@ -776,10 +1118,12 @@ def valuation(code: str):
 def quality():
     p = META / "quality" / "latest.json"
     if not p.exists():
-        return jsonify({})
-    import json
-
-    return jsonify(json.loads(p.read_text(encoding="utf-8")))
+        # 缺失时返回 null，前端据真值判断展示“质量报告不可用”（不是空对象）。
+        return jsonify(None)
+    try:
+        return jsonify(json.loads(p.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return jsonify(None)
 
 
 @app.get("/api/health")
@@ -798,6 +1142,8 @@ def index():
 
 @app.get("/<path:path>")
 def static_files(path: str):
+    if path == "api" or path.startswith("api/"):
+        abort(404, "unknown API endpoint")
     target = DIST / path
     if target.is_file():
         return send_from_directory(DIST, path)

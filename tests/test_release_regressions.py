@@ -42,7 +42,8 @@ def test_cw_uses_previous_day_cap_not_current_cap(mutable_lake, synthetic_lake):
     assert value == pytest.approx(0.0006)
 
 
-def test_missing_cap_exits_cw_but_remains_in_equal_weight(mutable_lake, synthetic_lake):
+def test_missing_previous_cap_makes_day_partial_instead_of_renormalising(mutable_lake, synthetic_lake):
+    """缺前日流通市值会降低 weight_coverage：按新契约整日 partial，CW/HHI 置 NULL，EW 不变。"""
     from pipeline import build_marts
 
     with duckdb.connect(str(mutable_lake)) as con:
@@ -50,11 +51,14 @@ def test_missing_cap_exits_cw_but_remains_in_equal_weight(mutable_lake, syntheti
                     [synthetic_lake.codes[0], synthetic_lake.days[-2]])
         con.execute(build_marts.SQL_FEAT)
         con.execute(build_marts.SQL_MARKET)
-        n, ew, cw = con.execute("SELECT n_valid,ew_ret,cw_ret FROM mart_market_day WHERE trade_date=?",
-                                [synthetic_lake.days[-1]]).fetchone()
+        n, ew, cw, quality, coverage = con.execute(
+            "SELECT n_valid,ew_ret,cw_ret,data_quality,weight_coverage FROM mart_market_day "
+            "WHERE trade_date=?", [synthetic_lake.days[-1]]).fetchone()
     assert n == 6
     assert ew == pytest.approx(0.005 / 6)
-    assert cw == pytest.approx((-110 * 0.01 + 130 * 0.02 - 140 * 0.02 + 150 * 0.005) / 650)
+    assert cw is None            # no small-sample renormalisation
+    assert quality == "partial"
+    assert coverage == pytest.approx(5 / 6)
 
 
 def test_zero_total_move_gives_null_concentration_share(mutable_lake, synthetic_lake):
@@ -174,8 +178,10 @@ def test_missing_index_day_does_not_become_zero_monthly_return(mutable_lake, syn
 def test_api_stock_returns_real_ohlcv(db_client, synthetic_lake):
     response = db_client.get(f"/api/stock/{synthetic_lake.codes[0]}")
     assert response.status_code == 200
-    bar = response.get_json()[-1]
-    assert {"open", "high", "low", "close", "vol"} <= bar.keys()
+    data = response.get_json()
+    assert data["adjust"] == "qfq"
+    bar = data["series"][-1]
+    assert {"open", "high", "low", "close", "vol", "adj_factor", "close_raw"} <= bar.keys()
     assert [bar[k] for k in ("open", "high", "low", "close", "vol")] == [10, 10.1, 10, 10.1, 1000]
 
 
@@ -216,7 +222,9 @@ def test_missing_quote_position_remains_visible(db_client, mutable_lake, synthet
         con.execute("DELETE FROM feat_stock WHERE ts_code=? AND trade_date=?", [code, synthetic_lake.days[-1]])
         con.execute(build_marts.SQL_LATEST)
     assert db_client.post("/api/watchlist", json={"ts_code": code, "shares": 100, "cost": 10}).status_code == 200
-    rows = db_client.get("/api/watchlist").get_json()
+    # 读取接口要求自定义头（防 CSRF/同源读取，见 W4-01/W14-01 契约）。
+    rows = db_client.get("/api/watchlist",
+                         headers={"X-Requested-With": "ashare-radar"}).get_json()
     assert len(rows) == 1
     assert rows[0]["ts_code"] == code
     assert rows[0]["shares"] == 100
