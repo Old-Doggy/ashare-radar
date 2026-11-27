@@ -32,31 +32,6 @@ Computes breadth, equal- and cap-weighted returns, concentration, sector partici
 - Chinese/English UI, dark/light themes, colorblind palette, URL state, PNG/CSV export
 - Single-file HTML build for offline use
 
-## Known limitations (quantified)
-
-Full list of 15 items: [docs/known_limitations.md](docs/known_limitations.md) (Chinese). The essentials:
-
-- **Historical partial sessions**: the v0.4.2 delivery database has **192** partial sessions
-  (2016-12-08..2022-11-16; 151 after 2018; 88 with <1000 core rows). **v0.4.3 backfilled all 192**
-  (failed=0, `remaining_partial=[]`, min daily rows 189→2,768), added **gate 15** to block regressions and
-  took over production through a controlled promotion. Historical sector coverage after repair is still
-  93–97% because the mapping is static, not point-in-time.
-- **ST 5% band break (upstream)**: since 2026-07-06 Tushare `stk_limit` returns a 10% band for stocks still
-  named ST, so `limit_up_5pct_n` has been 0 for 98 consecutive sessions. Verified upstream (148/148 match
-  local data), not fabricated locally; gate 16 warned on 2026-07-06 (148/5,515 = 2.68% band switches).
-- **Margin**: published T+1 (latest day empty); SZSE is missing upstream on 2026-05-11/18/21. From v0.4.3 a day
-  missing an exchange outputs NULL instead of a partial sum (`margin_n_exchanges`: 2,421 days=2 / 3 days=1 / latest=0).
-- **Official limit list**: `limit_list_d` permission is unavailable; broken-board rate / sealed amount only cover
-  2019-11-28..2026-05-22 (1,569 sessions) and show `—` otherwise. Limit-up counts use price-based limits.
-- **Sector mapping**: static bridge; 241 stocks / 328,485 rows unmapped (3.13% of history; 0 on the latest day),
-  so historical sector aggregates carry look-ahead bias.
-- **Others**: `fd_amount` unit anomaly on 95 sessions (2019-11-28..2020-04-20, now NULL); three historical codes
-  without listing dates (2,720 rows permanently excluded); northbound flow definition broke on 2024-08-19;
-  source reconciliation with `n=0` is *not* a pass; offline builds are snapshots and cannot receive later alerts.
-- **Performance**: the single-file build is 63,231,201 B (about 63.2 MB) with FCP 912 ms / load 852 ms / LCP 1,060 ms;
-  see [docs/performance.md](docs/performance.md) for the 2026-11-27 re-measurement (the old
-  "all endpoints p95<150 ms" claim no longer holds; `/api/stocks` p95 591–614 ms).
-
 ## Quick start
 
 Requirements: Python 3.12, Node 22.18+, a Tushare Pro token (additional endpoints require their own permissions).
