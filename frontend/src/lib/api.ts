@@ -371,9 +371,10 @@ export interface QualityGate {
   id: number;
   name: string;
   pass: boolean;
-  value: number | null;
+  /** 数值门禁为 number；gate15 为 {count,n_days,insufficient_history}，渲染前需按门禁语义格式化。 */
+  value: number | { count?: number; n_days?: number; insufficient_history?: boolean } | null;
   threshold: string;
-  level: "block" | "warn";
+  level: "block" | "warn" | "info";
   message: string;
 }
 

@@ -50,16 +50,35 @@ const GATE_ZH: Record<number, string> = {
   14: "上市日期完整",
   15: "历史完整性",
   16: "限价档稳定性",
+  17: "封单额量纲",
+  18: "行数趋势",
 };
 
-/** 门禁 6 实际检查的是「广度日变化」而不是当日广度，显示当日广度的同时标注语义（W9-08 缓解）。 */
-const fmtGate = (g: { id: number; value: number | null; message?: string }) => {
-  if (g.value === null || g.value === undefined) return "—";
-  if (g.id === 6) return `${(g.value * 100).toFixed(2)}%（当日广度）`;
-  if ([4, 5, 7, 11].includes(g.id)) return `${(g.value * 100).toFixed(2)}%`;
-  if (g.id === 9) return `${(g.value * 100).toFixed(2)}pp`;
-  if (g.id === 1) return g.value.toLocaleString("en-US");
-  return `${g.value}`;
+/** 门禁值可能是数值或对象（gate15 返回 {count,n_days,...}），统一按门禁语义格式化。 */
+const fmtGate = (g: { id: number; value: unknown }, zh: boolean) => {
+  const v = g.value;
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "object") {
+    const o = v as { count?: number; n_days?: number; insufficient_history?: boolean };
+    if (typeof o.count === "number" && typeof o.n_days === "number") {
+      if (o.insufficient_history) {
+        return zh ? `${o.n_days} 天（不足 20 日豁免）` : `${o.n_days} days (<20, exempt)`;
+      }
+      return zh ? `${o.count} 部分日 / ${o.n_days} 天` : `${o.count} partial / ${o.n_days} days`;
+    }
+    return "—";
+  }
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return "—";
+  if (g.id === 6) return `${(n * 100).toFixed(2)}%${zh ? "（当日广度）" : " (same-day breadth)"}`;
+  if ([4, 5, 7, 11].includes(g.id)) return `${(n * 100).toFixed(2)}%`;
+  if (g.id === 9) return `${(n * 100).toFixed(2)}pp`;
+  if (g.id === 1) return n.toLocaleString("en-US");
+  if (g.id === 16) return zh ? `${Math.round(n)} 只` : `${Math.round(n)} stocks`;
+  if (g.id === 17) return `${(n * 100).toFixed(2)}%`;
+  if (g.id === 18) return `${n.toFixed(3)}×`;
+  if (Number.isInteger(n)) return `${n}`;
+  return `${n.toFixed(4)}`;
 };
 
 export default function About() {
@@ -196,7 +215,7 @@ export default function About() {
                 <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--text-2)]">
                   {lang === "en" ? g.name : GATE_ZH[g.id] ?? g.name}
                 </span>
-                <span className="mono text-[11px] text-[var(--muted)]">{fmtGate(g)}</span>
+                <span className="mono text-[11px] text-[var(--muted)]">{fmtGate(g, zh)}</span>
               </div>
             ))}
           </div>
