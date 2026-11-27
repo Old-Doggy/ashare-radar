@@ -1,6 +1,16 @@
-"""用真实数据生成 docs/insights/I01–I10.md 的证据文档。"""
+"""用真实数据生成 docs/insights/I01–I10.md 的证据文档。
+
+用法（仓库根目录，对 data/lake.duckdb 只读）：
+    python scripts/gen_insights.py                                  # 默认 2018-01-01 起、写到 docs/insights
+    python scripts/gen_insights.py --start 2018-01-01 --end 2026-11-26
+    python scripts/gen_insights.py --lake data/repair/lake.duckdb --out <临时目录>
+
+每个文件顶部会写入 as-of（数据最新交易日）、生成命令与“快照可重跑”声明；
+历史部分日回补（v0.4.3）后同一命令会得到不同数字，属于预期。
+"""
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -8,18 +18,44 @@ import duckdb
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-LAKE = ROOT / "data" / "lake.duckdb"
-OUT = ROOT / "docs" / "insights"
 
 
 def main() -> None:
-    con = duckdb.connect(str(LAKE), read_only=True)
-    OUT.mkdir(parents=True, exist_ok=True)
+    ap = argparse.ArgumentParser(description="生成 docs/insights/I01–I10.md")
+    ap.add_argument("--lake", default=None, help="库路径（默认 data/lake.duckdb）")
+    ap.add_argument("--start", default="2018-01-01", help="样本起始日（默认 2018-01-01，2016-12 为预热区）")
+    ap.add_argument("--end", default=None, help="样本截止日（默认库内最新交易日）")
+    ap.add_argument("--out", default=None, help="输出目录（默认 docs/insights）")
+    args = ap.parse_args()
+
+    lake = Path(args.lake) if args.lake else ROOT / "data" / "lake.duckdb"
+    out_dir = Path(args.out) if args.out else ROOT / "docs" / "insights"
+    if not lake.exists():
+        raise SystemExit(f"库不存在：{lake}")
+    con = duckdb.connect(str(lake), read_only=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     q = lambda sql, p=None: con.execute(sql, p or []).fetchdf()
 
-    m = q("SELECT * FROM mart_market_day WHERE trade_date >= '2018-01-01' ORDER BY trade_date")
-    s = q("SELECT * FROM mart_sector_day WHERE trade_date >= '2018-01-01' ORDER BY trade_date")
+    last_day = str(q("SELECT max(trade_date) FROM mart_market_day")["max(trade_date)"].iloc[0])
+    end = args.end or last_day
+    m = q(
+        "SELECT * FROM mart_market_day WHERE trade_date >= ? AND trade_date <= ? ORDER BY trade_date",
+        [args.start, end],
+    )
+    s = q(
+        "SELECT * FROM mart_sector_day WHERE trade_date >= ? AND trade_date <= ? ORDER BY trade_date",
+        [args.start, end],
+    )
     n_days = len(m)
+    if n_days == 0:
+        raise SystemExit(f"样本为空：{args.start}..{end}")
+    as_of = str(end)[:10]
+    banner = (
+        f"> **as-of：{as_of}**（样本 {args.start}..{as_of}，共 {n_days} 个交易日）｜数据源：`{lake.name}` "
+        f"｜生成命令：`python scripts/gen_insights.py --start {args.start} --end {as_of}`\n"
+        "> 本文件已按 v0.4.3 接管后的库重算（192 个历史部分日已回补）；数据再次更新后用同一命令重跑即可，"
+        "以重跑输出为准（口径见 [known_limitations.md](../known_limitations.md)）。\n"
+    )
 
     def table(df: pd.DataFrame, cols: list[str], fmt: dict[str, str] | None = None) -> str:
         fmt = fmt or {}
@@ -38,9 +74,11 @@ def main() -> None:
             body += "| " + " | ".join(cells) + " |\n"
         return head + body
 
-    def save(name: str, title: str, question: str, definition: str, evidence: str, sample: str, chart: str, boundary: str) -> None:
+    def save(name: str, title: str, question: str, definition: str, evidence: str,
+             sample: str, chart: str, boundary: str) -> None:
         text = f"""# {name} · {title}
 
+{banner}
 **问题**：{question}
 
 **口径**：{definition}
@@ -53,7 +91,7 @@ def main() -> None:
 
 **边界**：{boundary}
 """
-        (OUT / f"{name}.md").write_text(text, encoding="utf-8")
+        (out_dir / f"{name}.md").write_text(text, encoding="utf-8")
 
     # I1
     i1 = m[(m.hs300_ret > 0) & (m.breadth < 0.45)]
@@ -62,7 +100,7 @@ def main() -> None:
         "I01", "指数涨 ≠ 多数股票涨",
         "指数上涨时，是否真的有足够多的股票参与？",
         "`hs300_ret > 0` 且 `breadth < 45%`；收益为官方 pct_chg/100，广度剔除平盘。",
-        f"2018 年以来 {n_days} 个交易日中，**{len(i1)} 天**（{len(i1)/n_days:.1%}）出现“指数收涨但不足 45% 股票上涨”。",
+        f"{args.start} 以来 {n_days} 个交易日中，**{len(i1)} 天**（{len(i1)/n_days:.1%}）出现“指数收涨但不足 45% 股票上涨”。",
         table(top1, ["trade_date", "hs300_ret", "ew_ret", "breadth", "top10_share"],
               {"hs300_ret": "{:+.2%}", "ew_ret": "{:+.2%}", "breadth": "{:.1%}", "top10_share": "{:.0%}"}),
         "Market 页双联图（上：收益 / 下：广度）；Regime 页右下象限。",
@@ -90,7 +128,7 @@ def main() -> None:
         "I03", "行业高收益 ≠ 行业内普涨",
         "行业涨幅是多数成分股共同形成，还是少数龙头拉动？",
         "行业等权收益 > 1% 且行业内上涨占比 < 35%。",
-        f"2018 年以来出现 **{len(i3)} 个**“高收益 + 低广度”的行业-日，占全部行业-日 {len(i3)/len(s):.2%}。",
+        f"{args.start} 以来出现 **{len(i3)} 个**“高收益 + 低广度”的行业-日，占全部行业-日 {len(i3)/len(s):.2%}。",
         table(top3, ["trade_date", "sw_l1", "ew_ret", "breadth", "n"],
               {"ew_ret": "{:+.2%}", "breadth": "{:.0%}"}),
         "Sectors 页气泡图（左上：权重拖累；右下：集中上涨）。",
@@ -130,11 +168,11 @@ def main() -> None:
         "I06", "情绪极值 ≠ 参与广度",
         "涨停很多的日子，是全面回暖还是局部狂欢？",
         "`limit_up_n ≥ 80` 且 `breadth < 45%`；涨停由 stk_limit 真实涨停价判定。",
-        f"2018 年以来 **{len(i6)} 天**出现“涨停≥80 家但广度<45%”，占 {len(i6)/n_days:.1%}。",
+        f"{args.start} 以来 **{len(i6)} 天**出现“涨停≥80 家但广度<45%”，占 {len(i6)/n_days:.1%}。",
         table(top6, ["trade_date", "limit_up_n", "breadth", "ew_ret", "max_streak"],
               {"breadth": "{:.0%}", "ew_ret": "{:+.2%}"}),
         "Sentiment 页涨跌停柱 + 广度折线；Today 页涨停/炸板 KPI。",
-        "2026-05 之后无 limit_list_d 权限，炸板率缺失；涨停家数仍完整。",
+        "官方名单（limit_list_d）仅覆盖 2019-11-28..2026-05-22 的 1,569 天，炸板率缺失；涨停家数为价格口径。",
     )
 
     # I7
@@ -162,9 +200,9 @@ def main() -> None:
         "I08", "轮动强度刻画行情性质",
         "行业排名迁移速度，能否区分单边行情与快速轮动？",
         "`rotation_intensity_t = mean_i |rank_{i,t} − rank_{i,t−1}|`，排名按 20 日累计收益。",
-        f"2018 年以来轮动强度均值 **{rot.mean():.2f} 名/日**，95 分位 {rot.quantile(0.95):.2f}；最高 {rot.max():.2f}。",
+        f"{args.start} 以来轮动强度均值 **{rot.mean():.2f} 名/日**，95 分位 {rot.quantile(0.95):.2f}；最高 {rot.max():.2f}。",
         table(pd.DataFrame({"trade_date": top8.index, "rotation": top8.values}), ["trade_date", "rotation"], {"rotation": "{:.2f}"}),
-        "Sectors 页轮动视图（规划中）；当前可用行业热力图观察轮动。",
+        "Sectors 页轮动视图（行业强度云，v0.4.0 起；`#/labs?demo=rotation` 可单独查看）。",
         "排名基于 20 日窗口，窗口选择会改变强度绝对值；只做相对比较。",
     )
 
@@ -180,12 +218,12 @@ def main() -> None:
         f"两融环比与 breadth 相关系数 **{c1:.2f}**；资金流广度与 breadth 相关系数 **{c2:.2f}**。",
         "",
         "Sentiment 页底部两融/资金流卡片。",
-        "仅为同步性描述，不构成因果；两融 T+1 发布。",
+        "仅为同步性描述，不构成因果；两融 T+1 发布，且 2026-05-11/18/21 上游缺 SZSE（v0.4.3 起不做部分和）。",
     )
 
     # I10 sample book
     codes = ["600519.SH", "300750.SZ", "688981.SH", "600036.SH", "002594.SZ", "300059.SZ"]
-    last = m.iloc[-1].trade_date
+    last = str(m.iloc[-1].trade_date)[:10]
     book = q(
         "SELECT ts_code, name, ret FROM feat_stock WHERE trade_date = ? AND ts_code IN (" + ",".join(["?"] * len(codes)) + ")",
         [last] + codes,
@@ -201,7 +239,7 @@ def main() -> None:
         "当前为等权自选，不含股数/成本；持仓盈亏与 Brinson 归因在 Roadmap。",
     )
 
-    print(json.dumps({"written": len(list(OUT.glob("I*.md"))), "days": n_days}, ensure_ascii=False))
+    print(json.dumps({"written": 10, "out": str(out_dir), "days": n_days, "as_of": as_of}, ensure_ascii=False))
     con.close()
 
 

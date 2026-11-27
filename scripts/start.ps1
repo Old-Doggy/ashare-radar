@@ -37,7 +37,9 @@ $single = Join-Path $dist "ashare-radar.html"
 
 if (-not (Test-Path -LiteralPath $index)) {
   if (Test-Path -LiteralPath $single) {
-    Write-Host "未找到 Web 构建，打开离线单文件：$single"
+    Write-Host "未找到 Web 构建（frontend/dist/index.html），改为打开离线单文件：$single"
+    Write-Warning "这是导出时的离线快照，不是实时服务：页面不含 /api 接口，数据可能已过期，也收不到后续更新告警。"
+    Write-Host "如需实时模式：cd frontend; npm run build，然后重新运行 start.bat。"
     if (-not $NoBrowser) { Start-Process $single }
     exit 0
   }
@@ -62,7 +64,7 @@ try {
 } catch {
   Write-Warning "Python 启动失败：$_"
   if (Test-Path -LiteralPath $single) {
-    Write-Warning "改为打开离线单文件（不包含实时接口）。"
+    Write-Warning "改为打开离线单文件：这是导出时的快照（非实时），不含 /api 接口，可能显示旧数据。"
     if (-not $NoBrowser) { Start-Process $single }
     exit 0
   }

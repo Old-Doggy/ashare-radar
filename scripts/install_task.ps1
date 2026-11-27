@@ -8,7 +8,11 @@ $py = & (Join-Path $PSScriptRoot "python.ps1")
 $pyLiteral = $py.Replace("'", "''")
 
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd `
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 45)
+  -ExecutionTimeLimit (New-TimeSpan -Minutes 45) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10)
+# 失败自动重试 3 次、每次间隔 10 分钟；默认电池策略会阻止任务启动，这里显式允许。
+# 注意：RestartCount 只在任务进程异常退出时触发；若想对 pipeline 失败做进程内重试，见 scripts/update.ps1。
 
 # 把已验证的解释器写进任务，避免计划任务环境里 PATH 指向缺少依赖的 python。
 $dailyArgs = "-NoProfile -ExecutionPolicy Bypass -Command `"`$env:ASHARE_RADAR_PYTHON='$pyLiteral'; & '$updateScript'`""

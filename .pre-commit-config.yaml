@@ -1,6 +1,7 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    # 与 pyproject.toml [project.optional-dependencies].dev 的 ruff==0.17.4 对齐（W12-13）
+    rev: v0.17.4
     hooks:
       - id: ruff
         args: [--select, E9,F63,F7,F82]
