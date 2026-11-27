@@ -246,8 +246,13 @@ def _history_gates(con: duckdb.DuckDBPyConnection, day: str, prev_day: str | Non
             "发布日专属检查（历史建库不适用；阈值未放宽）")
 
     bad_adj = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND (ts_code LIKE '%.SH' OR ts_code LIKE '%.SZ')
         AND (adj_factor IS NULL OR NOT isfinite(adj_factor) OR adj_factor<=0)""", [d]) or 0
-    add(8, "adj factor valid", bad_adj == 0, bad_adj, "0 invalid factors", "warn")
+    bse_no_adj = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND ts_code LIKE '%.BJ'
+        AND (adj_factor IS NULL OR NOT isfinite(adj_factor) OR adj_factor<=0)""", [d]) or 0
+    add(8, "adj factor valid", bad_adj == 0, bad_adj, "0 invalid factors (SSE/SZSE)", "warn",
+        f"北交所缺复权因子行={bse_no_adj}（不在分析池，不计告警）")
 
     bad_amount = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
         AND (amount IS NULL OR NOT isfinite(amount) OR amount<0 OR vol IS NULL
@@ -432,8 +437,13 @@ def run_gates(con: duckdb.DuckDBPyConnection, day: str, prev_day: str | None = N
     add(7, "industry coverage", gate7["pass"], coverage,
         f">={settings.GATE_MIN_INDUSTRY_COVERAGE}", "block", gate7["message"])
     bad_adj = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND (ts_code LIKE '%.SH' OR ts_code LIKE '%.SZ')
         AND (adj_factor IS NULL OR NOT isfinite(adj_factor) OR adj_factor<=0)""", [d]) or 0
-    add(8, "adj factor valid", bad_adj == 0, bad_adj, "0 invalid factors", "warn")
+    bse_no_adj = _scalar(con, """SELECT count(*) FROM core_stock_day WHERE trade_date=?
+        AND ts_code LIKE '%.BJ'
+        AND (adj_factor IS NULL OR NOT isfinite(adj_factor) OR adj_factor<=0)""", [d]) or 0
+    add(8, "adj factor valid", bad_adj == 0, bad_adj, "0 invalid factors (SSE/SZSE)", "warn",
+        f"北交所缺复权因子行={bse_no_adj}（不在分析池，不计告警）")
     delta_ew = abs(ew - prev_ew) if ew is not None and prev_ew is not None else None
     add(9, "EW continuity", delta_ew is None or delta_ew <= 0.08, delta_ew,
         "|EW change|<=0.08", "warn", "not comparable" if delta_ew is None else "")

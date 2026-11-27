@@ -236,6 +236,21 @@ def _fetch_day(day: str, disabled: set[str], lock: threading.Lock) -> dict:
     return out
 
 
+def _summarize_warnings(warnings: list[str], limit: int = 60) -> list[str]:
+    """把重复的按日警告合并成 `消息 ×N`，避免 status/payload 里塞上千条。"""
+    import re
+    from collections import Counter
+
+    counter: Counter = Counter()
+    for msg in warnings:
+        key = re.sub(r"^\d{8}\s+", "", msg)
+        counter[key] += 1
+    out = [f"{msg} ×{count}" if count > 1 else msg for msg, count in counter.items()]
+    if len(out) > limit:
+        out = out[:limit] + [f"… 其余 {len(counter) - limit} 类警告已省略"]
+    return out
+
+
 def _delete_day(con: duckdb.DuckDBPyConnection, day_date) -> None:
     """重跑某交易日时删除旧行；新日期（绝大多数情况）直接跳过。"""
     for table in DAY_TABLES:
@@ -419,8 +434,11 @@ def _run(start: str, end: str, db_path: str | None = None, gate_scope: str = "au
             warnings.append(
                 f"{coverage_below_publish} 个历史交易日上游字段覆盖率低于发布阈值 "
                 f"{settings.GATE_MIN_COVERAGE:.0%}（history 门禁以 95% 为阻断下限，属上游覆盖限制）")
-        result = {"status": "ok", "days": len(days), "affected_rows": total,
-                  "warnings": warnings, "sources_by_date": sources_by_date,
+        warning_summary = _summarize_warnings(warnings)
+        result = {"status": "ok", "days": len(days), "inserted_rows_sum_datasets": total,
+                  "affected_rows": total,
+                  "warnings": warning_summary, "warnings_raw_count": len(warnings),
+                  "sources_by_date": sources_by_date,
                   "rate": default_limiter().stats(),
                   "skipped_datasets": sorted(disabled),
                   "workers": workers,
@@ -432,7 +450,7 @@ def _run(start: str, end: str, db_path: str | None = None, gate_scope: str = "au
         atomic_write_json(settings.META / "bootstrap.json", result)
         atomic_write_json(settings.META / "status.json", {
             "status": "ok", "last_trade_date": days[-1] if days else None,
-            "sources": sources_by_date.get(days[-1], {}) if days else {}, "warnings": warnings,
+            "sources": sources_by_date.get(days[-1], {}) if days else {}, "warnings": warning_summary,
             "skipped_datasets": sorted(disabled)})
         return result
     finally:
