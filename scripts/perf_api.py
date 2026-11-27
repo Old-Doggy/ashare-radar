@@ -3,7 +3,7 @@
 用法（仓库根目录）：
     python scripts/perf_api.py                      # 自动取 mart_market_day 最新交易日
     python scripts/perf_api.py --date 2026-11-26    # 指定交易日
-    python scripts/perf_api.py --repeat 30 --out _fix_20261127/evidence/E/perf_api.json
+    python scripts/perf_api.py --repeat 30 --out data/meta/perf_api.json
 
 数据目录遵循 `ASHARE_RADAR_DATA_DIR`；对生产库只读（API 每请求开只读连接）。
 注意：结果是本机、冷/热缓存下的进程内测量，不是网络端到端指标；报告时需同时记录测量时间、

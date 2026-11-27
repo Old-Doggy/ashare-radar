@@ -2,7 +2,7 @@
 
 This script never runs automatically and never deletes the production database;
 it is the only supported way to adopt `data/repair/lake.duckdb` (see
-`_fix_20261127/修复计划与接口约定.md` §2.1).
+`docs/known_limitations.md`).
 
 Flow:
 1. validate the source copy (required tables, row counts, no remaining partial days);

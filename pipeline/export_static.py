@@ -116,7 +116,7 @@ def build_payload(con) -> dict:
             meta["warnings"] = st.get("warnings", [])
             raw_sources = st.get("sources", {}) or {}
             # 与 /api/meta 同口径：sources 只保留真实可用源，不可用数据集单列
-            # （W7-03/W9-22；契约见 _fix_20261127/修复计划与接口约定.md §2.5）。
+            # （W7-03/W9-22；契约见 docs/metric_contracts.md 与 docs/technical.md）。
             meta["sources"] = {k: v for k, v in raw_sources.items()
                                if v not in ("unavailable", "incomplete")}
             used = sorted(set(meta["sources"].values()))

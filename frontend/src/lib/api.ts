@@ -2,7 +2,7 @@
  * 静态模式下 window.__BL_DATA__ 由 export_static.py 注入，所有请求走本地内存。
  *
  * 2026-11 修复：本文件是 D1/D2 共享的类型契约（其他页面只读，不在页面里重定义）。
- * 契约要点（`_fix_20261127/修复计划与接口约定.md` §3）：
+ * 契约要点（API/静态双路径一致，见 docs/metric_contracts.md 与 docs/technical.md）：
  *  - 所有 /api/* 请求带 `X-Requested-With: ashare-radar`（GET /api/watchlist 必需）；
  *  - mart_market_day 追加 weight_coverage / n_valid_ratio / data_quality / margin_n_exchanges /
  *    n_extreme_ret（旧 payload 可能缺失，全部可选可空）；
