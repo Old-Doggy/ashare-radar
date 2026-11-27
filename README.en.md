@@ -86,25 +86,6 @@ See the [release instructions](docs/release.md).
 - Third-party components (DuckDB/Flask/React/ECharts/Tailwind/Vite/lucide, ...) keep their own licences; inlined
   fonts (Inter, JetBrains Mono, Noto Sans/Serif SC) are SIL OFL 1.1 as declared in [NOTICE](NOTICE).
 
-## Validation status
-
-| Item | Status (2026-11-27, after v0.4.3 integration) |
-|---|---|
-| Tests | pytest **236 passed / 0 failed / 0 skipped**; frontend `node --test` **117 passed / 0 fail** |
-| Static checks | `ruff check` clean; `tsc --noEmit` 0 errors |
-| Quality gates | **18**; 2026-11-26 `quality/latest` 18/18 pass, `blocking=[]` |
-| History integrity | **192/192** partial sessions backfilled (failed=0, `remaining_partial=[]`); gate 15 passes (`incomplete_dates`=0, min daily rows 2,768) |
-| Core data size | `core_stock_day` = **10,827,571** rows; `feat_stock` = 10,478,223; `mart_market_day` = 2,425 sessions (2016-12-01..2026-11-26) |
-| Static audit | `scripts/audit_all.py --offline`: **60 passed / 0 failed / 3 skipped** (verdict=`pass_with_skips`; skips are not passes) |
-| Artifacts | single-file HTML **63,231,201 B** (about 63.2 MB); static payload **17,624,011 B** (about 17.6 MB) |
-| Payload meta | `meta.version=0.4.3`; `meta.source=tushare`; `unavailable_datasets=["limit_list_d","margin"]`; `meta.data_quality.n_partial_days=0`, `repaired_days=192` |
-| Known limitations | 15 items quantified: [docs/known_limitations.md](docs/known_limitations.md) |
-
-Integration evidence: [docs/validation/v0.4.3-final.json](docs/validation/v0.4.3-final.json).
-Historical acceptance/fix reports (**historical documents**, see banners at the top):
-[completion report](docs/release_completion_report.md), [fix report](docs/release_fix_report.md),
-[v0.4.0 final review](docs/release_review_v0.4.0.md), [historical validation summary](docs/validation/README.md).
-
 ## Docs
 
 | Doc | Contents |

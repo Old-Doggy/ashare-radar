@@ -84,24 +84,6 @@ python -m pipeline.export_static
 - 第三方组件（DuckDB/Flask/React/ECharts/Tailwind/Vite/lucide 等）保留各自许可；
   内联字体（Inter、JetBrains Mono、Noto Sans/Serif SC）为 SIL OFL 1.1，声明见 [NOTICE](NOTICE)。
 
-## 验证状态
-
-| 项目 | 状态（2026-11-27，v0.4.3 集成后） |
-|---|---|
-| 单元/回归测试 | pytest **236 passed / 0 failed / 0 skipped**；前端 `node --test` **117 passed / 0 fail** |
-| 静态检查 | `ruff check` All checks passed；`tsc --noEmit` 0 error |
-| 质量门禁 | **18 条**；2026-11-26 `quality/latest` 18/18 通过、`blocking=[]` |
-| 历史完整性 | 回补 **192/192** 个部分交易日（failed=0，`remaining_partial=[]`）；gate15 通过（`incomplete_dates`=0，最小日行数 2,768） |
-| 核心数据量 | `core_stock_day` = **10,827,571** 行；`feat_stock` = 10,478,223；`mart_market_day` = 2,425 日（2016-12-01..2026-11-26） |
-| 静态审计 | `scripts/audit_all.py --offline`：**60 通过 / 0 失败 / 3 跳过**（verdict=`pass_with_skips`，跳过不算通过） |
-| 产物 | 单文件 HTML **63,231,201 B**（约 63.2 MB）；静态 payload **17,624,011 B**（约 17.6 MB） |
-| payload 元信息 | `meta.version=0.4.3`；`meta.source=tushare`；`unavailable_datasets=["limit_list_d","margin"]`；`meta.data_quality.n_partial_days=0`、`repaired_days=192` |
-| 已知限制 | 15 条逐项量化披露：[docs/known_limitations.md](docs/known_limitations.md) |
-
-本次集成验证证据：[docs/validation/v0.4.3-final.json](docs/validation/v0.4.3-final.json)。
-历史验收与修复报告（**历史文档，口径见文件顶部横幅**）：[最终交付报告](docs/release_completion_report.md)、
-[修复报告](docs/release_fix_report.md)、[v0.4.0 终审](docs/release_review_v0.4.0.md)、[历史验收证据摘要](docs/validation/README.md)。
-
 ## 文档
 
 | 文档 | 内容 |
