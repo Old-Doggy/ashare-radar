@@ -52,16 +52,18 @@ Two steps: fetch raw market data, then compute the analytics tables.
 ```bash
 # 2a. Raw data -> data/lake.duckdb (pick one)
 python -m pipeline.bootstrap_api --start 20240101   # A. directly via the Tushare API
-python -m pipeline.bootstrap                          # B. from a local parquet snapshot (layout: docs/data_setup.md)
+python -m pipeline.bootstrap                          # B. local parquet snapshot (docs/data_setup.md)
 
-# 2b. Raw data -> analytics tables (required once)
+# 2b. Raw data -> analytics tables (required)
 python -m pipeline.build_marts
+python -m pipeline.refresh_status                     # re-run 18 publish gates, refresh status/quality
 ```
 
 - `bootstrap_api` / `bootstrap`: write only the core raw tables (daily, daily_basic, adj_factor, stk_limit, indices, moneyflow, margin, ...). `--start` is the first date: `20240101` is about one year and takes a few minutes; a longer history (e.g. `20160101`, ~2,650 sessions) takes about **35–45 minutes** (3 concurrent fetch workers by default + a 450 req/min cap; tune with `--workers`). Re-running the same command resumes from checkpoints after an interruption.
 - `build_marts`: turns raw tables into `feat_stock`, `mart_market_day`, sector/rotation/monthly tables, ... **It must run once after bootstrapping, otherwise the dashboard has no data.** Skip it when you were given a ready `data/lake.duckdb` that already contains marts.
+- `refresh_status`: re-runs the **18 publish gates** for the latest session and refreshes `data/meta/status.json` + `quality/latest.json` (data date, sources, warnings, gate status), which the status bar and `export_static` read. It is not a hard prerequisite for starting the dashboard (bootstrap writes a last gate report), but **run it before publishing/exporting the static bundle**; `pipeline.release` includes this step automatically.
 - Both steps need the token. Optional endpoints such as `limit_list_d` are skipped with a warning when unavailable (the affected metrics show `—`, never wrong numbers).
-- Requests are paced automatically: at 5000 points the normal cap is 500/min, but `limit_list_d` is limited to 200/min and 10,000 calls/day and `stock_basic` to 50/min. This project keeps 20–40% headroom, retries rate-limit errors with exponential backoff, tries a permission-denied endpoint only once, and **resumes from checkpoints if you re-run the same command after an interruption**. See [docs/rate_limits.md](docs/rate_limits.md).
+- Requests are paced automatically: at 5000 points the normal cap is 500/min, but `limit_list_d` is limited to 200/min and 10,000 calls/day and `stock_basic` to 50/min. This project keeps ~10% headroom (450 req/min) and uses 3 fetch workers by default, retries rate-limit errors with exponential backoff, tries a permission-denied endpoint only once, and **resumes from checkpoints if you re-run the same command after an interruption**. See [docs/rate_limits.md](docs/rate_limits.md).
 
 > **The command returns to the prompt immediately with no output/progress?**
 > Usually this is not a hang: `python` is not the interpreter that has the dependencies (on Windows `python` often points to the Microsoft Store stub or another Python, which exits silently). Check first:
@@ -90,7 +92,7 @@ python -m backend.main                            # foreground server, Ctrl+C to
 
 - `backend.main`: starts the Flask server that serves both `/api/*` and the built frontend, then open <http://127.0.0.1:8000>. Without a frontend build it only serves the API, not the page.
 
-> If your working copy already contains `data/lake.duckdb` and `frontend/dist` (e.g. an existing dev checkout), **just double-click `start.bat`** — step 2 is not needed.
+> If your working copy already contains a **fully built `data/lake.duckdb` (with marts)** and `frontend/dist` (e.g. an existing dev checkout), **just double-click `start.bat`** — step 2 is not needed.
 
 ### 4. Daily updates and the offline single file
 
@@ -98,7 +100,7 @@ python -m backend.main                            # foreground server, Ctrl+C to
 python -m pipeline.release    # fetch the latest session -> 18 quality gates -> rebuild marts -> export offline HTML
 ```
 
-- Rebuild without fetching: `python -m pipeline.release --rebuild`; export only: `python -m pipeline.export_static`.
+- Rebuild without fetching: `python -m pipeline.release --rebuild`; export only: `python -m pipeline.export_static` (if you changed data manually, run `python -m pipeline.refresh_status` first or the export will be rejected by the gate date/status check).
 - The offline single file is `frontend/dist/ashare-radar.html`; double-click it to open. It is an export-time snapshot, needs no server and is not real-time.
 - The scheduled task, the API button and the Windows scripts share one publication chain; a failed run keeps the previous HTML and already-opened offline copies cannot receive later alerts. See the [release instructions](docs/release.md).
 

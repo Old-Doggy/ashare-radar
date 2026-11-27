@@ -52,16 +52,18 @@ cp .env.example .env
 ```bash
 # 2a. 原始行情 → data/lake.duckdb（二选一）
 python -m pipeline.bootstrap_api --start 20240101   # A. 直接调用 Tushare API
-python -m pipeline.bootstrap                          # B. 用本地 parquet 快照（目录结构见 docs/data_setup.md）
+python -m pipeline.bootstrap                          # B. 本地 parquet 快照（见 docs/data_setup.md）
 
-# 2b. 原始行情 → 分析表（必须执行一次）
+# 2b. 原始行情 → 分析表（必须执行）
 python -m pipeline.build_marts
+python -m pipeline.refresh_status                     # 重跑最新交易日 18 门禁并刷新 status/quality
 ```
 
 - `bootstrap_api` / `bootstrap`：只写入 core 原始表（daily、daily_basic、adj_factor、stk_limit、指数、资金流、两融等）。`--start` 是起始日期：`20240101` 约 1 年、几分钟量级；更长历史（如 `20160101`，约 2,650 个交易日）约 **35–45 分钟**（默认 3 并发取数 + 450 次/分钟限速，`--workers` 可调）；中断后重跑同一命令会从检查点续跑。
 - `build_marts`：把原始表算成 `feat_stock`、`mart_market_day`、行业/轮动/月表等分析表，**建库后必须跑一次，否则页面没有数据**。如果拿到的是别人构建好的 `data/lake.duckdb`（已含 marts），本步可跳过。
+- `refresh_status`：用最新交易日重跑 **18 条发布门禁**，刷新 `data/meta/status.json` 与 `quality/latest.json`（数据日期、来源、告警、门禁状态），页面状态栏和 `export_static` 都读它。它不是启动页面的硬前提（bootstrap 已写过最后一次门禁），但**发布/导出静态包前建议执行**；`pipeline.release` 会自动包含这一步。
 - 两步都需要 token；`limit_list_d` 等可选接口无权限时会自动跳过并告警（对应指标显示为 `—`，不显示错误数字）。
-- 请求自动限速：5000 积分常规接口 500 次/分钟，但 `limit_list_d` 是 200 次/分钟 + 1 万次/天、`stock_basic` 是 50 次/分钟；本项目默认留 20%–40% 余量，限频错误自动指数退避，无权限接口只试一次就跳过，**中断后重跑同一条命令会续跑**。详见 [docs/rate_limits.md](docs/rate_limits.md)。
+- 请求自动限速：5000 积分常规接口 500 次/分钟，但 `limit_list_d` 是 200 次/分钟 + 1 万次/天、`stock_basic` 是 50 次/分钟；本项目默认留约 10% 余量（450 次/分钟）且建库默认 3 并发，限频错误自动指数退避，无权限接口只试一次就跳过，**中断后重跑同一条命令会续跑**。详见 [docs/rate_limits.md](docs/rate_limits.md)。
 
 > **命令立刻回到提示符、没有任何输出/进度？**
 > 通常不是程序卡住，而是 `python` 不是装了依赖的那个解释器（Windows 上 `python` 常指向应用商店占位程序或另一个 Python，命令会静默退出）。先自检：
@@ -90,7 +92,7 @@ python -m backend.main                            # 前台启动服务，Ctrl+C 
 
 - `backend.main`：启动 Flask 服务，同时提供 `/api/*` 接口和已构建的前端页面，浏览器打开 <http://127.0.0.1:8000>；前端未构建时只返回 API、不显示页面。
 
-> 如果工作区已经带有 `data/lake.duckdb` 和 `frontend/dist`（例如本机开发目录），**直接双击 `start.bat` 即可**，无需再做第 2 步。
+> 如果工作区已经带有**完成建库（含 marts）的 `data/lake.duckdb`** 和 `frontend/dist`（例如本机开发目录），**直接双击 `start.bat` 即可**，无需再做第 2 步。
 
 ### 4. 每日更新与离线单文件
 
@@ -98,7 +100,7 @@ python -m backend.main                            # 前台启动服务，Ctrl+C 
 python -m pipeline.release    # 拉取最新交易日 → 18 条质量门禁 → 重算 marts → 导出离线 HTML
 ```
 
-- 只重建不拉数据：`python -m pipeline.release --rebuild`；只导出离线包：`python -m pipeline.export_static`。
+- 只重建不拉数据：`python -m pipeline.release --rebuild`；只导出离线包：`python -m pipeline.export_static`（若刚手动改过数据，先跑 `python -m pipeline.refresh_status`，否则导出会被门禁日期/状态拦住）。
 - 离线单文件在 `frontend/dist/ashare-radar.html`，双击即可打开；它是导出时的快照，不需要服务也不实时。
 - 更新任务、API 按钮和 Windows 脚本共用同一发布链；失败会保留上一版 HTML，已打开的离线包不会自动收到新告警。详见[发布说明](docs/release.md)。
 
